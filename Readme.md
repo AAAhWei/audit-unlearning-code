@@ -7,3 +7,4 @@ This folder contains the code for the paper "Auditing of Unlearning Algorithms".
 - `shakeshpere_plays_audit/`: all the Shakespeare runs (character-level LSTM).
 - `llama_unlearning/`: LLM-scale audit on TOFU with Llama-3.2-1B-Instruct.
 - `convex_unlearning_output_perturbation/`: the output perturbation and Newton-based convex unlearning algorithms.
+- `pooled_linear_auditor/`: MVP of the calibration-efficient joint auditor (pooled within-configuration variance, linear mean in the sign vector); numpy only, with tests and a synthetic demo.
