@@ -136,6 +136,6 @@ CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/run_audits.sh C1    # pool seeds 0,
   `make_custom_split.py --random --balanced --assign_seed <pool seed>`.
 - The three C1 seeds are pool seeds. The pipeline script gives no seed to the runner,
   thus each training run uses the runner default (seed 3).
-- Settings: claimed epsilon `inf,1000,100`, delta `1e-3`, 100 noise reloads, 500 sampled
+- Settings: claimed epsilon `inf,100,1000,2000`, delta `1e-3`, 100 noise reloads, 500 sampled
   runs, `ci-delta` 0.05.
 - Results: `/tmp2/enzo/audit-unlearning/r2d/<config>/audit/rho_audit_summary.csv`.

@@ -30,7 +30,7 @@
 #                [/tmp2/enzo/miniconda3/envs/unlearn-audit/bin]
 #   OUT_ROOT     Root directory for the results. [/tmp2/enzo/audit-unlearning/r2d]
 #   NUM_JOBS     Number of parallel runs on each GPU. [2]
-#   EPSILONS     List of claimed epsilon values. [inf,1000,100]
+#   EPSILONS     List of claimed epsilon values. [inf,100,1000,2000]
 #   DELTA        Delta for the noise calibration. [1e-3]
 #                The paper does not give its delta value.
 #   RELOADS      Number of noise reloads for each model. [100]
@@ -48,7 +48,7 @@ fi
 ENV_BIN=${ENV_BIN:-/tmp2/enzo/miniconda3/envs/unlearn-audit/bin}
 OUT_ROOT=${OUT_ROOT:-/tmp2/enzo/audit-unlearning/r2d}
 NUM_JOBS=${NUM_JOBS:-2}
-EPSILONS=${EPSILONS:-inf,1000,100}
+EPSILONS=${EPSILONS:-inf,100,1000,2000}
 DELTA=${DELTA:-1e-3}
 RELOADS=${RELOADS:-100}
 NUM_SAMPLES=${NUM_SAMPLES:-500}
