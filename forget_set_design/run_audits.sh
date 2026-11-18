@@ -32,6 +32,7 @@
 #   NUM_JOBS     Number of parallel runs on each GPU. [2]
 #   EPSILONS     List of claimed epsilon values. [inf,1000,100]
 #   DELTA        Delta for the noise calibration. [1e-3]
+#                The paper does not give its delta value.
 #   RELOADS      Number of noise reloads for each model. [100]
 #   NUM_SAMPLES  Number of sampled runs in the audit. [500]
 #   CI_DELTA     Confidence parameter of the lower bounds. [0.05]
@@ -40,7 +41,7 @@ set -euo pipefail
 
 CONFIG=${1:-}
 if [ -z "$CONFIG" ]; then
-    sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
@@ -56,6 +57,10 @@ THREADS=${THREADS:-4}
 DRY_RUN=${DRY_RUN:-0}
 
 # spec.md section 5.3 sets these values. All configurations use the same values.
+# The paper (arXiv 2607.05898, Appendix G.2) uses T = 40 and K = 5 with full-batch
+# updates and a learning rate of 0.01. T = 40 is 35 training epochs plus 5 unlearning
+# epochs. The paper does not give the micro-batch size. 128 is the default of the
+# pipeline script.
 TRAIN_EPOCHS=35
 UNLEARN_EPOCHS=5
 LR=0.01
