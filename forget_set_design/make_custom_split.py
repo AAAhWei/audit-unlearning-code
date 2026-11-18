@@ -21,7 +21,8 @@ Assignment sources (exactly one):
     --assignment FILE.csv   columns global_idx,batch_id (header required)
     --paper_uniform         the forget pool and batches split_cifar100_train.py
                             --split_mode uniform would produce for --seed
-    --random                a uniformly random pool and assignment (--assign_seed)
+    --random                a uniformly random pool and assignment (--assign_seed);
+                            add --balanced for the same number of points per class
 
 Usage (from the repository root):
     python forget_set_design/make_custom_split.py --assignment a.csv --out_dir <split dir>
@@ -119,11 +120,30 @@ def paper_uniform_assignment(
 
 
 def random_assignment(
-    train_idx: np.ndarray, n_batches: int, batch_size: int, assign_seed: int
+    train_idx: np.ndarray, n_batches: int, batch_size: int, assign_seed: int,
+    labels: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Random forget pool, randomly dealt into batches. With `labels` (indexed by global
+    index) the pool is class-balanced: the same number of points from every class.
+    """
     rng = np.random.default_rng(assign_seed)
-    pool = rng.choice(np.sort(train_idx), size=n_batches * batch_size, replace=False)
-    return pool, np.arange(pool.shape[0]) // batch_size
+    n = n_batches * batch_size
+    candidates = np.sort(train_idx)
+    if labels is None:
+        pool = rng.choice(candidates, size=n, replace=False)
+    else:
+        classes = np.unique(labels)
+        if n % classes.shape[0]:
+            raise ValueError(f"{n} points cannot be split evenly over {classes.shape[0]} classes")
+        per_class = n // classes.shape[0]
+        cand_labels = labels[candidates]
+        pool = np.concatenate([
+            rng.choice(candidates[cand_labels == c], size=per_class, replace=False)
+            for c in classes
+        ])
+        pool = pool[rng.permutation(n)]
+    return pool, np.arange(n) // batch_size
 
 
 def read_assignment_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -213,6 +233,8 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=1,
                    help="Seed of the paper split: fixes val hold-out and train/val order")
     p.add_argument("--assign_seed", type=int, default=0, help="Seed for --random")
+    p.add_argument("--balanced", action="store_true",
+                   help="With --random: class-balanced pool (same count per class)")
     p.add_argument("--save_assignment", type=Path, default=None,
                    help="Also write the assignment used as a global_idx,batch_id CSV")
     p.add_argument("--overwrite", action="store_true", help="Replace an existing --out_dir")
@@ -227,7 +249,8 @@ def main() -> int:
             return 1
         shutil.rmtree(out_dir)
 
-    n_full = load_batch_dir(input_root / "train")[1].shape[0]
+    all_labels = load_batch_dir(input_root / "train")[1]
+    n_full = all_labels.shape[0]
 
     if args.assignment is not None:
         global_idx, batch_id = read_assignment_csv(args.assignment)
@@ -239,7 +262,8 @@ def main() -> int:
     else:
         train_idx = paper_holdout(n_full, args.val_split, args.seed)["train_idx"]
         global_idx, batch_id = random_assignment(
-            train_idx, args.n_batches, args.batch_size, args.assign_seed)
+            train_idx, args.n_batches, args.batch_size, args.assign_seed,
+            labels=all_labels if args.balanced else None)
 
     write_split(out_dir, input_root, global_idx, batch_id, n_batches=args.n_batches,
                 batch_size=args.batch_size, val_split=args.val_split, seed=args.seed)
