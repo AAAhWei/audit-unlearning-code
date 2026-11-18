@@ -39,3 +39,6 @@ venv/
 env/
 .DS_Store
 *.log
+
+# Local scratch symlink (see forget_set_design/README.md)
+/certified_unlearning_plus_grad_based_methods/data
