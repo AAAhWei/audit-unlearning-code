@@ -2,10 +2,16 @@
 # This script does one audit configuration of spec.md section 5.
 # It uses the r2d_audit/ pipeline and does not change that pipeline.
 #
-# The script does three steps for each configuration:
+# The script does two steps for each configuration:
 #   1. It trains and unlearns all 20 combinations of 3 forget batches from 6.
-#   2. It calculates the phi statistics with noise reloads.
-#   3. It calculates the epsilon lower bounds (decoder B1) and writes a summary CSV.
+#   2. It audits the unlearned models with the joint sign-vector decoder (decoder B2).
+#      joint_decoder_r2d.py does this step. It calculates the phi scores with noise
+#      draws, predicts the deleted batches, and calculates the epsilon lower bounds.
+#
+# OFFICIAL_AUDIT=1 adds a third step. That step starts the two audit scripts of the
+# pipeline (evaluate_combination_models.py, evaluate_prediction_cumulative_model.py).
+# These scripts use the same joint decoder rule. But they use only one noise draw for
+# each run in the evaluation, thus their evaluation samples are not independent.
 #
 # Usage:
 #   CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/run_audits.sh <config>
@@ -23,7 +29,8 @@
 # DRY_RUN=1 prints the commands and does not start them.
 # The script skips each step that is complete. Use the same command to continue
 # after an interruption.
-# The script writes the results to $OUT_ROOT/<config>/audit/rho_audit_summary.csv.
+# The script writes the results to $OUT_ROOT/<config>/joint/joint_summary.csv.
+# With OFFICIAL_AUDIT=1, it also writes $OUT_ROOT/<config>/audit/rho_audit_summary.csv.
 #
 # Settings are environment variables. The default values are in brackets.
 #   ENV_BIN      Directory of the python environment.
@@ -33,15 +40,20 @@
 #   EPSILONS     List of claimed epsilon values. [inf,100,1000,2000]
 #   DELTA        Delta for the noise calibration. [1e-3]
 #                The paper does not give its delta value.
-#   RELOADS      Number of noise reloads for each model. [100]
-#   NUM_SAMPLES  Number of sampled runs in the audit. [500]
+#   RELOADS      Number of calibration noise draws for each model. [100]
+#   NUM_SAMPLES  Number of evaluation trials in the audit. [500]
 #   CI_DELTA     Confidence parameter of the lower bounds. [0.05]
+#   METHODS      List of decoder methods: b2, ours_a, ours_b. [b2]
+#                b2 is the decoder of the paper.
+#   CALIB_SEED   Seed of the calibration noise. [0]
+#   EVAL_SEED    Seed of the evaluation noise. [1]
+#   OFFICIAL_AUDIT  Set to 1 to start the audit scripts of the pipeline also. [0]
 #   THREADS      Number of CPU threads for each process. [4]
 set -euo pipefail
 
 CONFIG=${1:-}
 if [ -z "$CONFIG" ]; then
-    sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
@@ -53,6 +65,10 @@ DELTA=${DELTA:-1e-3}
 RELOADS=${RELOADS:-100}
 NUM_SAMPLES=${NUM_SAMPLES:-500}
 CI_DELTA=${CI_DELTA:-0.05}
+METHODS=${METHODS:-b2}
+CALIB_SEED=${CALIB_SEED:-0}
+EVAL_SEED=${EVAL_SEED:-1}
+OFFICIAL_AUDIT=${OFFICIAL_AUDIT:-0}
 THREADS=${THREADS:-4}
 DRY_RUN=${DRY_RUN:-0}
 
@@ -71,6 +87,9 @@ RUN_SUBDIR="bs_full_train_${TRAIN_EPOCHS}_unlearn_${UNLEARN_EPOCHS}_lr_${LR//./_
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 R2D_DIR="$REPO/r2d_audit"
 SPLITS=$(realpath "$REPO/certified_unlearning_plus_grad_based_methods/data/cifar100/data_split")
+
+N_STEPS=2
+if [ "$OFFICIAL_AUDIT" = "1" ]; then N_STEPS=3; fi
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -113,9 +132,9 @@ audit_one() {
         DONE=$(find "$RES" -maxdepth 2 -name run_metadata.json | wc -l)
     fi
     if [ "$DONE" -ge "$N_COMBOS" ]; then
-        echo "[1/3] All $N_COMBOS runs are complete. The script skips the training."
+        echo "[1/$N_STEPS] All $N_COMBOS runs are complete. The script skips the training."
     else
-        echo "[1/3] Train and unlearn. $DONE of $N_COMBOS runs are complete."
+        echo "[1/$N_STEPS] Train and unlearn. $DONE of $N_COMBOS runs are complete."
         if [ "$DONE" -gt 0 ]; then
             # Do only the runs that are not complete.
             # Argument 13 of the pipeline script selects one combination. The index starts at 1.
@@ -139,30 +158,39 @@ audit_one() {
         fi
     fi
 
-    # Step 2: phi statistics.
+    # Step 2: joint sign-vector decoder (decoder B2).
     # An empty marker file records that this step is complete for these settings.
-    local STATS_TAG="$BASE/stats/.done_eps${EPSILONS}_delta${DELTA}_reloads${RELOADS}"
-    if [ -f "$STATS_TAG" ]; then
-        echo "[2/3] The phi statistics are complete. The script skips this step."
+    local SETTINGS="eps${EPSILONS}_delta${DELTA}_calib${RELOADS}_eval${NUM_SAMPLES}"
+    local JOINT_TAG="$BASE/joint/.done_${SETTINGS}_${METHODS}_seeds${CALIB_SEED}_${EVAL_SEED}"
+    if [ -f "$JOINT_TAG" ]; then
+        echo "[2/$N_STEPS] The joint decoder audit is complete. The script skips this step."
     else
-        echo "[2/3] Calculate the phi statistics."
+        echo "[2/$N_STEPS] Audit with the joint decoder."
+        run python3 "$REPO/forget_set_design/joint_decoder_r2d.py" \
+            --results-dir "$RES" --data-dir "$DATA" --output-dir "$BASE/joint" \
+            --epsilon "$EPSILONS" --delta "$DELTA" --num-calib "$RELOADS" \
+            --num-eval "$NUM_SAMPLES" --methods "$METHODS" --ci-delta "$CI_DELTA" \
+            --calib-seed "$CALIB_SEED" --eval-seed "$EVAL_SEED" \
+            --config-id "$NAME" --device cuda:0
+        if [ "$DRY_RUN" != "1" ]; then touch "$JOINT_TAG"; fi
+    fi
+    echo "=== $NAME: joint decoder results: $BASE/joint/joint_summary.csv"
+
+    # Step 3 (only with OFFICIAL_AUDIT=1): the audit scripts of the pipeline.
+    if [ "$OFFICIAL_AUDIT" = "1" ]; then
+        echo "[3/$N_STEPS] Start the audit scripts of the pipeline."
         run python3 evaluation_scripts/evaluate_combination_models.py \
             --results-dir "$RES" --data-dir "$DATA" --model-type unlearnt \
             --epsilon "$EPSILONS" --delta "$DELTA" --num-shadow-reloads "$RELOADS" \
             --device cuda:0 --output-dir "$BASE/stats"
-        if [ "$DRY_RUN" != "1" ]; then touch "$STATS_TAG"; fi
+        run python3 evaluation_scripts/evaluate_prediction_cumulative_model.py \
+            --results-dir "$RES" --data-dir "$DATA" --stats-dir "$BASE/stats" \
+            --output-dir "$BASE/audit" --epsilon "$EPSILONS" --delta "$DELTA" \
+            --metric phi --num-samples "$NUM_SAMPLES" --ci-delta "$CI_DELTA" \
+            --num-shadow-reloads "$RELOADS" --no-generate-if-missing --device cuda:0
+        run python3 collect_rho_audit.py --results-dir "$BASE/audit"
+        echo "=== $NAME: pipeline audit results: $BASE/audit/rho_audit_summary.csv"
     fi
-
-    # Step 3: lower bounds.
-    echo "[3/3] Calculate the epsilon lower bounds."
-    run python3 evaluation_scripts/evaluate_prediction_cumulative_model.py \
-        --results-dir "$RES" --data-dir "$DATA" --stats-dir "$BASE/stats" \
-        --output-dir "$BASE/audit" --epsilon "$EPSILONS" --delta "$DELTA" \
-        --metric phi --num-samples "$NUM_SAMPLES" --ci-delta "$CI_DELTA" \
-        --num-shadow-reloads "$RELOADS" --no-generate-if-missing --device cuda:0
-
-    run python3 collect_rho_audit.py --results-dir "$BASE/audit"
-    echo "=== $NAME is complete. Results: $BASE/audit/rho_audit_summary.csv"
 }
 
 # Create the C1 split directory for one pool seed if it does not exist. Then audit it.

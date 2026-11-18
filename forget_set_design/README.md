@@ -136,6 +136,30 @@ CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/run_audits.sh C1    # pool seeds 0,
   `make_custom_split.py --random --balanced --assign_seed <pool seed>`.
 - The three C1 seeds are pool seeds. The pipeline script gives no seed to the runner,
   thus each training run uses the runner default (seed 3).
-- Settings: claimed epsilon `inf,100,1000,2000`, delta `1e-3`, 100 noise reloads, 500 sampled
-  runs, `ci-delta` 0.05.
-- Results: `/tmp2/enzo/audit-unlearning/r2d/<config>/audit/rho_audit_summary.csv`.
+- Settings: claimed epsilon `inf,100,1000,2000`, delta `1e-3`, 100 calibration noise
+  draws for each configuration, 500 evaluation trials, `ci-delta` 0.05, calibration
+  seed 0, evaluation seed 1.
+- Results: `/tmp2/enzo/audit-unlearning/r2d/<config>/joint/joint_summary.csv`.
+
+### Decoders
+
+The branch is rebased on `origin/pooled-linear-auditor-mvp`, which adds
+`pooled_linear_auditor/` (the joint decoder `b2` and the variants `ours_a`, `ours_b`).
+
+- **The R2D audit script of the paper is the joint decoder (B2), not B1.** spec.md
+  section 5.2 says that `evaluate_prediction_cumulative_model.py` is the batchwise
+  decoder. That is not correct. The script fits one Gaussian for each point and each
+  run, adds the log-likelihoods of all points, and selects the run with the largest
+  sum. This is Algorithm 3 of the paper.
+- **`joint_decoder_r2d.py` is the adapter** between the R2D runs and
+  `pooled_linear_auditor/pooled_linear.py`. It calculates the phi scores with the
+  functions of `r2d_audit/`, and it uses the epsilon test in
+  `r2d_audit/cum_runs_eps_lab.py`. `run_audits.sh` starts it in step 2.
+- **Why the adapter and not the script of the paper:** the script of the paper keeps
+  the first noisy evaluation of each run in a cache and uses it again. With 500 samples
+  and 20 runs, it evaluates only 20 different noise draws, but the epsilon test assumes
+  500 independent trials. The adapter makes a new noise draw for each trial. It also
+  uses different generators for calibration and evaluation (§6 rule 3).
+- `OFFICIAL_AUDIT=1` starts the audit scripts of the paper also, for comparison.
+- `METHODS=b2,ours_a,ours_b` adds the two variants. They use the same scores.
+- Decoder B1 (batchwise) is not implemented for R2D on this branch.
