@@ -1,43 +1,46 @@
 #!/bin/bash
-# Run one audit configuration of spec.md section 5 end to end, with the unchanged
-# r2d_audit/ pipeline:
-#   1. train + unlearn all 20 combinations of 3 of 6 forget batches
-#   2. phi statistics with noise reloads
-#   3. epsilon lower bounds (decoder B1) and a summary CSV
+# This script does one audit configuration of spec.md section 5.
+# It uses the r2d_audit/ pipeline and does not change that pipeline.
+#
+# The script does three steps for each configuration:
+#   1. It trains and unlearns all 20 combinations of 3 forget batches from 6.
+#   2. It calculates the phi statistics with noise reloads.
+#   3. It calculates the epsilon lower bounds (decoder B1) and writes a summary CSV.
 #
 # Usage:
-#   forget_set_design/run_audits.sh <config> <gpu>
+#   CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/run_audits.sh <config>
 #
-#   <config>  C0          the paper's uniform split
-#             C1          class-balanced random pool, pool seeds 0, 1 and 2 in turn
-#             C1_seed<N>  one of them
-#   <gpu>     ONE physical GPU id. Check nvidia-smi first; the script refuses a
-#             reserved GPU and a GPU running another user's process.
+#   <gpu>     The physical GPU id. You select the GPU. The script does not examine it.
+#   <config>  C0          Use the uniform split directory of the paper.
+#             C1          Use a class-balanced random pool for each pool seed 0, 1, 2.
+#             C1_seed<N>  Use a class-balanced random pool for pool seed N only.
 #
 # Examples:
-#   forget_set_design/run_audits.sh C0 4
-#   forget_set_design/run_audits.sh C1 4
-#   DRY_RUN=1 forget_set_design/run_audits.sh C1 4      # print the commands only
+#   CUDA_VISIBLE_DEVICES=4 forget_set_design/run_audits.sh C0
+#   CUDA_VISIBLE_DEVICES=4 forget_set_design/run_audits.sh C1
+#   DRY_RUN=1 CUDA_VISIBLE_DEVICES=4 forget_set_design/run_audits.sh C1
 #
-# Finished steps are skipped, so the same command resumes an interrupted run.
-# Results: $OUT_ROOT/<config>/audit/rho_audit_summary.csv
+# DRY_RUN=1 prints the commands and does not start them.
+# The script skips each step that is complete. Use the same command to continue
+# after an interruption.
+# The script writes the results to $OUT_ROOT/<config>/audit/rho_audit_summary.csv.
 #
-# Settings (environment variables, defaults in brackets):
-#   ENV_BIN      python environment [/tmp2/enzo/miniconda3/envs/unlearn-audit/bin]
-#   OUT_ROOT     results root on scratch [/tmp2/enzo/audit-unlearning/r2d]
-#   NUM_JOBS     parallel runs on the GPU [2]
-#   EPSILONS     claimed epsilon grid [inf,1000,100]
-#   DELTA        noise delta [1e-3]
-#   RELOADS      noise reloads per model [100]
-#   NUM_SAMPLES  sampled runs in the audit [500]
-#   CI_DELTA     confidence slack [0.05]
-#   THREADS      CPU threads per process [4]
+# Settings are environment variables. The default values are in brackets.
+#   ENV_BIN      Directory of the python environment.
+#                [/tmp2/enzo/miniconda3/envs/unlearn-audit/bin]
+#   OUT_ROOT     Root directory for the results. [/tmp2/enzo/audit-unlearning/r2d]
+#   NUM_JOBS     Number of parallel runs on each GPU. [2]
+#   EPSILONS     List of claimed epsilon values. [inf,1000,100]
+#   DELTA        Delta for the noise calibration. [1e-3]
+#   RELOADS      Number of noise reloads for each model. [100]
+#   NUM_SAMPLES  Number of sampled runs in the audit. [500]
+#   CI_DELTA     Confidence parameter of the lower bounds. [0.05]
+#   THREADS      Number of CPU threads for each process. [4]
 set -euo pipefail
 
 CONFIG=${1:-}
-GPU=${2:-}
-if [ -z "$CONFIG" ] || [ -z "$GPU" ]; then
-    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+if [ -z "$CONFIG" ]; then
+    sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
@@ -52,7 +55,7 @@ CI_DELTA=${CI_DELTA:-0.05}
 THREADS=${THREADS:-4}
 DRY_RUN=${DRY_RUN:-0}
 
-# Fixed by the spec (section 5.3): R2D defaults, same for every configuration.
+# spec.md section 5.3 sets these values. All configurations use the same values.
 TRAIN_EPOCHS=35
 UNLEARN_EPOCHS=5
 LR=0.01
@@ -65,110 +68,105 @@ R2D_DIR="$REPO/r2d_audit"
 SPLITS=$(realpath "$REPO/certified_unlearning_plus_grad_based_methods/data/cifar100/data_split")
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# Print a command. Start the command only if DRY_RUN is not 1.
 run() {
     echo "+ $*"
     if [ "$DRY_RUN" != "1" ]; then "$@"; fi
 }
 
 # ---------------------------------------------------------------- checks
-[[ "$GPU" =~ ^[0-9]+$ ]] || die "<gpu> must be one GPU id, got '$GPU'"
-[ -x "$ENV_BIN/python3" ] || die "no python3 under $ENV_BIN (set ENV_BIN)"
-[ -d "$SPLITS" ] || die "split directory not found: $SPLITS"
-
-# Shared-server GPU policy.
-HOST=$(hostname -s)
-case "$HOST" in
-    Celebi) die "all GPUs on Celebi are reserved; run on another host" ;;
-    Mew)    [ "$GPU" != "3" ] || die "GPU 3 on Mew is reserved" ;;
-    Lugia)  [ "$GPU" != "0" ] || die "GPU 0 on Lugia is reserved" ;;
-esac
-
-nvidia-smi -i "$GPU" > /dev/null 2>&1 || die "GPU $GPU not found on $HOST"
-OTHERS=""
-for PID in $(nvidia-smi -i "$GPU" --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
-    OWNER=$(ps -o user= -p "$PID" 2>/dev/null | tr -d ' ' || true)
-    if [ "$OWNER" != "$(id -un)" ]; then
-        OTHERS="$OTHERS ${OWNER:-unknown}(pid $PID)"
-    fi
-done
-[ -z "$OTHERS" ] || die "GPU $GPU is in use by:$OTHERS. Pick a free GPU."
+# The pipeline script needs the physical GPU ids as an argument.
+# The script gets these ids from CUDA_VISIBLE_DEVICES.
+GPUS=${CUDA_VISIBLE_DEVICES:-}
+[ -n "$GPUS" ] || die "CUDA_VISIBLE_DEVICES is not set. Set it to the GPU id that you want to use."
+[[ "$GPUS" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "CUDA_VISIBLE_DEVICES must be a list of GPU ids. The value is '$GPUS'."
+[ -x "$ENV_BIN/python3" ] || die "$ENV_BIN does not contain python3. Set ENV_BIN to the correct directory."
+[ -d "$SPLITS" ] || die "The directory $SPLITS does not exist. Create the data splits first."
 
 export PATH="$ENV_BIN:$PATH"
 export OMP_NUM_THREADS=$THREADS MKL_NUM_THREADS=$THREADS OPENBLAS_NUM_THREADS=$THREADS
 export NUMEXPR_NUM_THREADS=$THREADS
 
 # ---------------------------------------------------------------- one configuration
-audit_one() {    # audit_one <name> <split dir>
+# Audit one configuration.
+# Arguments: <name of the configuration> <split directory>
+audit_one() {
     local NAME=$1 DATA=$2
     local BASE="$OUT_ROOT/$NAME"
     local RES="$BASE/$RUN_SUBDIR"
-    [ -d "$DATA/forget" ] || [ "$DRY_RUN" = "1" ] || die "no forget/ under $DATA"
+    [ -d "$DATA/forget" ] || [ "$DRY_RUN" = "1" ] || die "$DATA does not contain a forget directory."
 
     echo
-    echo "=== $NAME  split=$DATA  gpu=$GPU  host=$HOST  $(date '+%F %T')"
+    echo "=== $NAME  split=$DATA  gpus=$GPUS  host=$(hostname -s)  $(date '+%F %T')"
     [ "$DRY_RUN" = "1" ] || mkdir -p "$BASE"
 
-    # 1. train + unlearn
+    # Step 1: train and unlearn.
+    # A run is complete when its directory contains run_metadata.json.
     local DONE=0
     if [ -d "$RES" ]; then
         DONE=$(find "$RES" -maxdepth 2 -name run_metadata.json | wc -l)
     fi
     if [ "$DONE" -ge "$N_COMBOS" ]; then
-        echo "[1/3] $DONE/$N_COMBOS runs already complete, skipping training"
+        echo "[1/3] All $N_COMBOS runs are complete. The script skips the training."
     else
-        echo "[1/3] train + unlearn ($DONE/$N_COMBOS runs complete so far)"
+        echo "[1/3] Train and unlearn. $DONE of $N_COMBOS runs are complete."
         if [ "$DONE" -gt 0 ]; then
-            # Rerun only the missing combinations (argument 13 = 1-based index).
+            # Do only the runs that are not complete.
+            # Argument 13 of the pipeline script selects one combination. The index starts at 1.
             for I in $(seq 1 "$N_COMBOS"); do
                 if [ ! -f "$RES/run_$(printf '%03d' "$I")/run_metadata.json" ]; then
                     run ./run_all_combinations_forget_unlearning.sh "$DATA" "$BASE" \
-                        cifar100 tinynetcifar100 "$GPU" 1 full "$MICRO_BS" \
+                        cifar100 tinynetcifar100 "$GPUS" 1 full "$MICRO_BS" \
                         "$TRAIN_EPOCHS" "$UNLEARN_EPOCHS" false "$LR" "$I"
                 fi
             done
         else
             run ./run_all_combinations_forget_unlearning.sh "$DATA" "$BASE" \
-                cifar100 tinynetcifar100 "$GPU" "$NUM_JOBS" full "$MICRO_BS" \
+                cifar100 tinynetcifar100 "$GPUS" "$NUM_JOBS" full "$MICRO_BS" \
                 "$TRAIN_EPOCHS" "$UNLEARN_EPOCHS" false "$LR"
         fi
         if [ "$DRY_RUN" != "1" ]; then
             DONE=$(find "$RES" -maxdepth 2 -name run_metadata.json | wc -l)
-            [ "$DONE" -ge "$N_COMBOS" ] || die "only $DONE/$N_COMBOS runs finished; see $RES/logs/"
-            echo "Accuracy of the trained models (paper reports about 4% for R2D):"
+            [ "$DONE" -ge "$N_COMBOS" ] || die "Only $DONE of $N_COMBOS runs are complete. Read the logs in $RES/logs/."
+            echo "Test accuracy of the trained models. The paper gives approximately 4% for R2D."
             grep -h "\[train\] final test accuracy" "$RES"/logs/run_*.log | sort | uniq -c
         fi
     fi
 
-    # 2. phi statistics
+    # Step 2: phi statistics.
+    # An empty marker file records that this step is complete for these settings.
     local STATS_TAG="$BASE/stats/.done_eps${EPSILONS}_delta${DELTA}_reloads${RELOADS}"
     if [ -f "$STATS_TAG" ]; then
-        echo "[2/3] phi statistics already computed, skipping"
+        echo "[2/3] The phi statistics are complete. The script skips this step."
     else
-        echo "[2/3] phi statistics"
-        CUDA_VISIBLE_DEVICES=$GPU run python3 evaluation_scripts/evaluate_combination_models.py \
+        echo "[2/3] Calculate the phi statistics."
+        run python3 evaluation_scripts/evaluate_combination_models.py \
             --results-dir "$RES" --data-dir "$DATA" --model-type unlearnt \
             --epsilon "$EPSILONS" --delta "$DELTA" --num-shadow-reloads "$RELOADS" \
             --device cuda:0 --output-dir "$BASE/stats"
         if [ "$DRY_RUN" != "1" ]; then touch "$STATS_TAG"; fi
     fi
 
-    # 3. lower bounds
-    echo "[3/3] epsilon lower bounds"
-    CUDA_VISIBLE_DEVICES=$GPU run python3 evaluation_scripts/evaluate_prediction_cumulative_model.py \
+    # Step 3: lower bounds.
+    echo "[3/3] Calculate the epsilon lower bounds."
+    run python3 evaluation_scripts/evaluate_prediction_cumulative_model.py \
         --results-dir "$RES" --data-dir "$DATA" --stats-dir "$BASE/stats" \
         --output-dir "$BASE/audit" --epsilon "$EPSILONS" --delta "$DELTA" \
         --metric phi --num-samples "$NUM_SAMPLES" --ci-delta "$CI_DELTA" \
         --num-shadow-reloads "$RELOADS" --no-generate-if-missing --device cuda:0
 
     run python3 collect_rho_audit.py --results-dir "$BASE/audit"
-    echo "=== $NAME done: $BASE/audit/rho_audit_summary.csv"
+    echo "=== $NAME is complete. Results: $BASE/audit/rho_audit_summary.csv"
 }
 
-c1_one() {       # c1_one <pool seed>
+# Create the C1 split directory for one pool seed if it does not exist. Then audit it.
+# Argument: <pool seed>
+c1_one() {
     local SEED=$1
     local DATA="$SPLITS/c1_random_rand_seed$SEED"
     if [ -d "$DATA/forget" ]; then
-        echo "Split exists: $DATA"
+        echo "The split directory $DATA exists. The script uses it."
     else
         run python3 "$REPO/forget_set_design/make_custom_split.py" \
             --random --balanced --assign_seed "$SEED" --out_dir "$DATA" \
@@ -183,7 +181,7 @@ case "$CONFIG" in
     C0)        audit_one C0 "$SPLITS/cifar100_uniform_bs_750_seed1" ;;
     C1)        for S in 0 1 2; do c1_one "$S"; done ;;
     C1_seed*)  S=${CONFIG#C1_seed}
-               [[ "$S" =~ ^[0-9]+$ ]] || die "bad config '$CONFIG'"
+               [[ "$S" =~ ^[0-9]+$ ]] || die "The configuration '$CONFIG' is not correct. Use C1_seed<N> with a number N."
                c1_one "$S" ;;
-    *)         die "unknown config '$CONFIG' (use C0, C1 or C1_seed<N>)" ;;
+    *)         die "The configuration '$CONFIG' is not known. Use C0, C1 or C1_seed<N>." ;;
 esac

@@ -1,25 +1,27 @@
 """
-CIFAR dataset backed by the batch pickles of a pre-split directory.
+This module contains a CIFAR dataset that reads the batch files of a pre-split directory.
 
-RECONSTRUCTION. The paper's release imports this module from datasets.py but does not
-ship it. This version was rewritten from how the rest of r2d_audit/ uses it; see
-forget_set_design/README.md for the evidence behind each choice.
+THIS MODULE IS A RECONSTRUCTION. The code release of the paper imports this module in
+datasets.py but does not contain it. We wrote this version from the way the other files
+in r2d_audit/ use it. forget_set_design/README.md gives the evidence for each decision.
 
-A folder holds one or more pickles, each an (images, labels) or (images, labels, ids)
-tuple (dicts with data/images/x and labels/targets/y keys are accepted too):
+A directory contains one or more .pkl files. Each file is a tuple (images, labels) or
+(images, labels, ids). A dictionary with the keys data/images/x and labels/targets/y is
+also correct.
     images  (N, 32, 32, 3) uint8, channels last
     labels  (N,) integer class ids
-Files are read in sorted filename order and rows keep their order inside each file.
+The dataset reads the files in sorted name order. The rows keep their file order.
 
-Items are (image, target, identity), the triple main.py, r2d.py and mia.py unpack.
-With transform=None the image is the raw pixel array as float32, channels first, values
-0-255: exactly what the audit scripts feed the model
-(`torch.tensor(img, dtype=torch.float32).permute(2, 0, 1)` in evaluation_scripts/), so
-training and auditing see identical inputs.
+Each item is (image, target, identity). main.py, r2d.py and mia.py read these three
+values.
+If transform is None, the image is the raw pixel array: float32, channels first, values
+0 to 255. The audit scripts in evaluation_scripts/ give the model the same input:
+`torch.tensor(img, dtype=torch.float32).permute(2, 0, 1)`.
+Thus the training and the audit use the same inputs.
 
-When a file carries no ids, every row gets the batch index parsed from the file name
-(batch_00003.pkl -> 3), the convention of r2d_audit/README.md and of
-random_forget_runner_all_combinations.load_batch_file.
+If a file contains no ids, each row gets the batch index from the file name. For
+example, the rows of batch_00003.pkl get the identity 3. r2d_audit/README.md and
+random_forget_runner_all_combinations.load_batch_file use the same rule.
 """
 
 import pickle
@@ -44,7 +46,12 @@ def _first_present(d, keys):
 
 
 def _read_pickle(path, file_pos):
-    """Return (images uint8 NHWC, labels int64 (N,), ids int64 (N,)) of one file."""
+    """
+    Read one file.
+    Return (images uint8 NHWC, labels int64 (N,), ids int64 (N,)).
+    `file_pos` is the position of the file in the directory. It is the identity of
+    the rows if the file name contains no batch index.
+    """
     with open(path, "rb") as f:
         batch = pickle.load(f)
 
@@ -58,16 +65,18 @@ def _read_pickle(path, file_pos):
         labels = _first_present(batch, _LABEL_KEYS)
         ids = _first_present(batch, _ID_KEYS)
     else:
-        raise ValueError(f"Unexpected batch format {type(batch)} in {path}")
+        raise ValueError(f"The file {path} has an incorrect format: {type(batch)}.")
 
     images = np.asarray(images)
-    if images.ndim == 3:  # a single (H, W, C) sample
+    # A 3-dimensional array is one sample (H, W, C). Add the batch dimension.
+    if images.ndim == 3:
         images = images[np.newaxis, ...]
     if images.ndim != 4:
-        raise ValueError(f"Unexpected image shape {images.shape} in {path}")
+        raise ValueError(f"The file {path} has an incorrect image shape: {images.shape}.")
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
     if labels.shape[0] != images.shape[0]:
-        raise ValueError(f"{path}: {images.shape[0]} images but {labels.shape[0]} labels")
+        raise ValueError(
+            f"The file {path} has {images.shape[0]} images and {labels.shape[0]} labels.")
 
     if ids is None:
         m = re.match(r"batch_(\d+)", Path(path).stem)
@@ -79,10 +88,13 @@ def _read_pickle(path, file_pos):
 
 class CIFARPickle(VisionDataset):
     """
-    Same interface as lacuna.Lacuna100Large: `targets` and `identities` cover every
-    stored row, `indices` selects the rows the dataset exposes, `reset()` restores all.
+    This dataset has the same interface as lacuna.Lacuna100Large.
 
-    root: a folder of *.pkl files, or one .pkl file.
+    `targets` and `identities` contain all rows.
+    `indices` selects the rows that the dataset gives.
+    `reset()` selects all rows again.
+
+    root: a directory of .pkl files, or one .pkl file.
     """
 
     def __init__(self, root, transform=None, target_transform=None):
@@ -91,7 +103,7 @@ class CIFARPickle(VisionDataset):
         root = Path(root)
         files = [root] if root.is_file() else sorted(root.glob("*.pkl"))
         if not files:
-            raise FileNotFoundError(f"No .pkl files under {root}")
+            raise FileNotFoundError(f"{root} contains no .pkl file.")
 
         parts = [_read_pickle(p, i) for i, p in enumerate(files)]
         self.data = np.concatenate([p[0] for p in parts], axis=0)
@@ -109,7 +121,8 @@ class CIFARPickle(VisionDataset):
             target = self.target_transform(target)
 
         if self.transform is None:
-            # Raw pixels, float32, CHW, 0-255: identical to the audit scripts' inputs.
+            # Give the raw pixels: float32, channels first, values 0 to 255.
+            # The audit scripts use the same input.
             img = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1).float()
         else:
             img = self.transform(Image.fromarray(img))

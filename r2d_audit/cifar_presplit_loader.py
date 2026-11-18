@@ -1,34 +1,39 @@
 """
-DataLoaders over a pre-split CIFAR directory (train/ val/ test/ retain/ forget/).
+This module creates the DataLoaders for a pre-split CIFAR directory.
+The directory contains the subdirectories train/ val/ test/ retain/ forget/.
 
-RECONSTRUCTION. The paper's release imports this module from datasets.py but does not
-ship it. This version was rewritten from how datasets.py and main.py call it; see
-forget_set_design/README.md for the evidence behind each choice.
+THIS MODULE IS A RECONSTRUCTION. The code release of the paper imports this module in
+datasets.py but does not contain it. We wrote this version from the calls in datasets.py
+and main.py. forget_set_design/README.md gives the evidence for each decision.
 
 datasets.get_loaders_large calls
     load_cifar_presplit(root, batch_size=..., shuffle=..., seed=..., augment=...)
-and falls back to its legacy path when the result is None.
+If the result is None, datasets.get_loaders_large uses its legacy directory layout.
 
-main.py then uses these keys of the returned dict:
-    train_loader    training phase: root is a per-run folder whose train/ holds
-                    train_combined.pkl (retain batches, then the chosen forget batches)
-    valid_loader    never shuffled
+main.py uses these keys of the returned dictionary:
+    train_loader    In the training phase, root is a directory for one run.
+                    Its train/ contains train_combined.pkl. That file contains the
+                    retain batches first, then the selected forget batches.
+    valid_loader    This loader does not shuffle.
     test_loader
-    retain_loader   unlearning phase: root is the split itself; main.py trains on this
-                    loader when resuming
-    forget_loader   every batch file under root/forget
-    num_forget_ids  number of points under root/forget (only used in the run name)
+    retain_loader   In the unlearning phase, root is the split directory.
+                    main.py trains on this loader when it resumes from a checkpoint.
+    forget_loader   This loader reads all batch files in root/forget.
+    num_forget_ids  The number of points in root/forget. main.py uses this number only
+                    in the name of the run.
 
-No 'forget_ids' key is returned on purpose: main.py would overwrite the runner's
-forget_ids.json with it.
+The dictionary has no 'forget_ids' key. If it had this key, main.py would replace the
+forget_ids.json file of the runner.
 
-Order: files in sorted name order, rows in file order. Loaders shuffle only when
-shuffle=True (run_all_combinations_forget_unlearning.sh defaults to false), each with
-its own generator so they do not disturb one another. Under full-batch gradient descent
-the order only changes floating-point summation order.
+Order: the dataset reads the files in sorted name order. The rows keep their file order.
+A loader shuffles only if shuffle=True. The default of
+run_all_combinations_forget_unlearning.sh is false.
+Each loader that shuffles has its own random generator. Thus one loader does not change
+the order of a different loader.
+With full-batch gradient descent, the order changes only the floating-point rounding.
 
-Inputs are raw pixels (float32, channels first, 0-255) with no normalisation, matching
-the audit scripts; see cifar_pickle.py.
+The inputs are raw pixels: float32, channels first, values 0 to 255, no normalisation.
+The audit scripts use the same inputs. Refer to cifar_pickle.py.
 """
 
 import os
@@ -39,8 +44,10 @@ import torchvision.transforms as transforms
 
 from cifar_pickle import CIFARPickle
 
-# split folder -> (key in the returned dict, follows `shuffle`, generator offset)
-# Offsets 0, 1 and 3 mirror the legacy loaders in datasets.get_loaders_large.
+# Each entry is: (subdirectory, key in the returned dictionary,
+#                 the loader obeys the `shuffle` argument, offset of the generator seed).
+# The offsets 0, 1 and 3 are the same as in the legacy loaders of
+# datasets.get_loaders_large.
 _LOADERS = (
     ("train", "train_loader", True, 0),
     ("val", "valid_loader", False, None),
@@ -52,23 +59,30 @@ _REQUIRED = ("train", "val")
 
 
 def _augment_transform():
-    """Crop/flip on the raw 0-255 scale. main.py always passes augment=False."""
+    """
+    Return the crop and flip transform. The output values stay in the range 0 to 255.
+    main.py always sets augment=False, thus the pipeline does not use this transform.
+    """
     return transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
-        transforms.PILToTensor(),               # uint8, CHW, 0-255
+        # PILToTensor gives a uint8 tensor, channels first, values 0 to 255.
+        transforms.PILToTensor(),
         transforms.Lambda(lambda t: t.float()),
     ])
 
 
 def _has_pickles(path):
+    """Return True if `path` is a directory that contains a .pkl file."""
     return os.path.isdir(path) and any(f.endswith(".pkl") for f in os.listdir(path))
 
 
 def load_cifar_presplit(root, batch_size=128, shuffle=True, seed=1, augment=False):
     """
-    Build the loaders for a pre-split CIFAR root, or return None when root does not
-    contain train/ and val/ pickles (the caller then tries its legacy layout).
+    Create the loaders for a pre-split CIFAR directory.
+
+    Return None if `root` does not contain .pkl files in train/ and val/.
+    The caller then uses its legacy directory layout.
     """
     root = str(root)
     if not all(_has_pickles(os.path.join(root, s)) for s in _REQUIRED):
@@ -79,15 +93,15 @@ def load_cifar_presplit(root, batch_size=128, shuffle=True, seed=1, augment=Fals
         torch.manual_seed(int(seed) + worker_id)
 
     loaders = {}
-    for split, key, follows_shuffle, offset in _LOADERS:
+    for split, key, obeys_shuffle, offset in _LOADERS:
         path = os.path.join(root, split)
         if not _has_pickles(path):
             continue
-        # Only the training data is ever augmented; retain is what unlearning trains on.
+        # Augment only the data that the model trains on: train/ and retain/.
         transform = _augment_transform() if augment and split in ("train", "retain") else None
         dataset = CIFARPickle(root=path, transform=transform)
 
-        do_shuffle = bool(shuffle) and follows_shuffle
+        do_shuffle = bool(shuffle) and obeys_shuffle
         generator = None
         if do_shuffle:
             generator = torch.Generator()
@@ -101,7 +115,7 @@ def load_cifar_presplit(root, batch_size=128, shuffle=True, seed=1, augment=Fals
             num_workers=0,
             pin_memory=False,
         )
-        print(f"[cifar_presplit] {split}: {len(dataset)} samples from {path}")
+        print(f"[cifar_presplit] {split}: {len(dataset)} samples in {path}")
         if split == "forget":
             loaders["num_forget_ids"] = len(dataset)
 

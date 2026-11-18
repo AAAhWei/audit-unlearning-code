@@ -119,3 +119,23 @@ about 4% for R2D (Appendix G.2). If C0 does not land near it, revisit normalisat
 2. **Joint (B2) decoder:** where is the teammate's implementation? The fork has a branch
    `origin/pooled-linear-auditor-mvp` with a `pooled_linear_auditor/` folder; not yet
    inspected.
+
+## Step 1 (§5.7): R2D audits C0 and C1
+
+`run_audits.sh` does one configuration with the `r2d_audit/` pipeline. It does not change
+the pipeline. You select the GPU with `CUDA_VISIBLE_DEVICES`. The script does not examine
+the GPU.
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/run_audits.sh C0    # split of the paper
+CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/run_audits.sh C1    # pool seeds 0, 1, 2
+```
+
+- C1 uses a class-balanced random pool (45 points for each class) and a random
+  assignment. The script creates each split directory with
+  `make_custom_split.py --random --balanced --assign_seed <pool seed>`.
+- The three C1 seeds are pool seeds. The pipeline script gives no seed to the runner,
+  thus each training run uses the runner default (seed 3).
+- Settings: claimed epsilon `inf,1000,100`, delta `1e-3`, 100 noise reloads, 500 sampled
+  runs, `ci-delta` 0.05.
+- Results: `/tmp2/enzo/audit-unlearning/r2d/<config>/audit/rho_audit_summary.csv`.

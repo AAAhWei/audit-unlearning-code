@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-Check a split written by make_custom_split.py against a reference split written by
+This script examines a split directory from make_custom_split.py.
+It compares the split directory with a reference split directory from
 scripts/split_cifar100_train.py (spec.md section 1, "First task").
 
-Checks:
-  1. layout: same sub-folders, file names, tuple type, dtypes and shapes per file
-  2. train/, val/, test/ are byte-for-byte the same data as the reference
-  3. forget and retain are disjoint and together equal the training set; no val leakage
-  4. rows match split_indices.npz, and global index = row of the original CIFAR-100 file
-  5. (--expect_identical_forget) forget/ equals the reference file by file, and retain/
-     holds the same points
-  6. both pipelines' readers load it (JAX data_cache; R2D build_train_pickle)
+The script does these checks:
+  1. The two directories have the same subdirectories and file names. Each file has
+     the same tuple type, dtypes and shapes.
+  2. train/, val/ and test/ contain the same data as the reference, row for row.
+  3. forget and retain have no common point. Together they are the training set.
+     They contain no validation point.
+  4. The rows agree with split_indices.npz. The global index of a point is its row in
+     the original CIFAR-100 file.
+  5. With --expect_identical_forget: each file in forget/ is the same as in the
+     reference, and retain/ contains the same points.
+  6. The readers of the two pipelines can load the split directory. These are the JAX
+     data_cache module and the R2D function build_train_pickle.
 
-Run on CPU: the JAX loader would otherwise allocate on a GPU.
+Do this check on the CPU. If a GPU is visible, the JAX loader allocates GPU memory.
     CUDA_VISIBLE_DEVICES="" python forget_set_design/check_custom_split.py \
-        --split <custom split> --reference <paper split>
+        --split <split directory> --reference <reference split directory>
 """
 
 from __future__ import annotations
@@ -37,12 +42,14 @@ FAILED: list[str] = []
 
 
 def check(ok: bool, msg: str) -> None:
+    """Print the result of one check. Record the message if the check fails."""
     print(f"[{'ok' if ok else 'FAIL'}] {msg}")
     if not ok:
         FAILED.append(msg)
 
 
 def load_files(d: Path) -> list[tuple[str, object]]:
+    """Read all batch files in a directory. Return a list of (file name, content)."""
     out = []
     for p in sorted(d.glob("batch_*.pkl")):
         with p.open("rb") as f:
@@ -51,11 +58,15 @@ def load_files(d: Path) -> list[tuple[str, object]]:
 
 
 def cat(files) -> tuple[np.ndarray, np.ndarray]:
+    """Join the images and the labels of a list of batch files."""
     return (np.concatenate([b[0] for _, b in files]), np.concatenate([b[1] for _, b in files]))
 
 
 def row_keys(images: np.ndarray, labels: np.ndarray) -> np.ndarray:
-    """Sorted per-row byte keys (image + label), for order-free comparison."""
+    """
+    Return one byte key for each row (image and label), in sorted order.
+    Two sets of rows are the same if their sorted keys are the same.
+    """
     flat = np.concatenate(
         [images.reshape(images.shape[0], -1), labels.astype(np.uint8)[:, None]], axis=1)
     keys = np.ascontiguousarray(flat).view([("k", f"V{flat.shape[1]}")]).ravel()
@@ -64,44 +75,48 @@ def row_keys(images: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--split", type=Path, required=True)
-    p.add_argument("--reference", type=Path, required=True)
+    p.add_argument("--split", type=Path, required=True,
+                   help="Split directory from make_custom_split.py.")
+    p.add_argument("--reference", type=Path, required=True,
+                   help="Split directory from split_cifar100_train.py.")
     p.add_argument("--expect_identical_forget", action="store_true",
-                   help="The split was made with --paper_uniform from the reference's seed")
+                   help="Use this option if --paper_uniform made the split directory "
+                        "with the seed of the reference.")
     p.add_argument("--raw_train", type=Path, default=None,
-                   help="Original CIFAR-100 'train' file (default: data/cifar100/extracted)")
+                   help="The original CIFAR-100 train file. "
+                        "The default is the file in data/cifar100/extracted.")
     args = p.parse_args()
     split, ref = args.split.resolve(), args.reference.resolve()
 
     new = {s: load_files(split / s) for s in SPLITS}
     old = {s: load_files(ref / s) for s in SPLITS}
 
-    # 1. layout
+    # Check 1: layout.
     for s in SPLITS:
         same_names = [n for n, _ in new[s]] == [n for n, _ in old[s]]
         sig = lambda fs: [(type(b).__name__, len(b), type(b[0]).__name__, b[0].dtype.str,
                            b[0].shape, b[1].dtype.str, b[1].shape) for _, b in fs]
         check(same_names and sig(new[s]) == sig(old[s]),
-              f"{s}: {len(new[s])} files, names/types/dtypes/shapes match the reference")
+              f"{s}: {len(new[s])} files. Names, types, dtypes and shapes agree with the reference.")
 
-    # 2. shared splits identical
+    # Check 2: train/, val/ and test/ are the same as the reference.
     for s in ("train", "val", "test"):
         a, b = cat(new[s]), cat(old[s])
         check(np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1]),
-              f"{s}: identical to the reference, row for row")
+              f"{s}: each row is the same as in the reference.")
 
-    # 3 + 4. index bookkeeping
+    # Checks 3 and 4: the global indices.
     idx = np.load(split / "split_indices.npz")
     tr, va, re, fo = (idx[k] for k in ("train", "val", "retain", "forget"))
-    check(np.intersect1d(fo, re).size == 0, "forget and retain are disjoint")
+    check(np.intersect1d(fo, re).size == 0, "forget and retain have no common point.")
     check(np.array_equal(np.sort(np.concatenate([fo, re])), np.sort(tr)),
-          "forget + retain = training set")
+          "forget and retain together are the training set.")
     check(np.intersect1d(np.concatenate([fo, re]), va).size == 0,
-          "no validation point in forget or retain")
+          "forget and retain contain no validation point.")
     bid = idx["forget_batch_id"]
     bs = int(idx["batch_size"])
     check(np.array_equal(bid, np.arange(fo.shape[0]) // bs),
-          f"forget file k holds exactly the {bs} points assigned to batch k")
+          f"forget file k contains the {bs} points of batch k.")
 
     raw = args.raw_train or (ROOT / "certified_unlearning_plus_grad_based_methods" / "data"
                              / "cifar100" / "extracted" / "cifar-100-python" / "train")
@@ -112,20 +127,20 @@ def main() -> int:
     for s, gi in (("train", tr), ("val", va), ("retain", re), ("forget", fo)):
         x, y = cat(new[s])
         check(np.array_equal(x, raw_x[gi]) and np.array_equal(y, raw_y[gi]),
-              f"{s}: rows equal the original CIFAR-100 images at split_indices.npz[{s!r}]")
+              f"{s}: each row is the original CIFAR-100 image at its global index.")
     coarse = np.asarray(d[b"coarse_labels"])
     check(all(np.unique(coarse[raw_y == c]).size == 1 for c in range(100)),
-          "original file: every fine class maps to one superclass (for the label grouping)")
+          "original file: each fine class belongs to one superclass.")
 
-    # 5. exact reproduction of the paper's forget set
+    # Check 5: forget/ and retain/ are the same as in the paper split.
     if args.expect_identical_forget:
         same = all(np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
                    for (_, a), (_, b) in zip(new["forget"], old["forget"]))
-        check(same, "forget: every batch file identical to the reference")
+        check(same, "forget: each batch file is the same as in the reference.")
         check(np.array_equal(row_keys(*cat(new["retain"])), row_keys(*cat(old["retain"]))),
-              "retain: same points as the reference (order differs by design)")
+              "retain: the points are the same as in the reference. The order is different.")
 
-    # 6. pipeline readers
+    # Check 6: the readers of the two pipelines.
     sys.path.insert(0, str(ROOT / "certified_unlearning_plus_grad_based_methods"))
     try:
         from src.utils.data_cache import load_cifar_splits_with_batch_subset
@@ -135,9 +150,9 @@ def main() -> int:
         n_f = sum(int(b[0].shape[0]) for b in fl)
         check(len(tl) == (re.shape[0] + 3 * bs) // 128 and n_f == 3 * bs
               and list(chosen) == [0, 2, 4],
-              f"model-clipping loader: {len(tl)} train batches of 128, {n_f} forget points")
+              f"model-clipping loader: {len(tl)} train batches of 128 and {n_f} forget points.")
     except Exception as e:  # noqa: BLE001
-        check(False, f"model-clipping loader raised {type(e).__name__}: {e}")
+        check(False, f"model-clipping loader stopped with {type(e).__name__}: {e}")
 
     sys.path.insert(0, str(ROOT / "r2d_audit"))
     try:
@@ -149,11 +164,11 @@ def main() -> int:
         exp_x, exp_y = cat(new["retain"] + [new["forget"][k] for k in (1, 3, 5)])
         check(np.array_equal(x, exp_x) and np.array_equal(y, exp_y)
               and x.shape[0] == re.shape[0] + 3 * bs,
-              f"R2D build_train_pickle: {x.shape[0]} training points for combination (1,3,5)")
+              f"R2D build_train_pickle: {x.shape[0]} training points for the combination (1,3,5).")
     except Exception as e:  # noqa: BLE001
-        check(False, f"R2D build_train_pickle raised {type(e).__name__}: {e}")
+        check(False, f"R2D build_train_pickle stopped with {type(e).__name__}: {e}")
 
-    print(f"\n{'ALL CHECKS PASSED' if not FAILED else f'{len(FAILED)} CHECK(S) FAILED'}")
+    print(f"\n{'ALL CHECKS PASSED' if not FAILED else f'FAILED CHECKS: {len(FAILED)}'}")
     return 1 if FAILED else 0
 
 
