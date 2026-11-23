@@ -37,7 +37,7 @@ configuration are then always the same, and the decoder is always correct. The
 result is the maximum lower bound for --num-eval trials.
 
 Usage (from the repository root):
-    CUDA_VISIBLE_DEVICES=<gpu> python forget_set_design/joint_decoder_r2d.py \\
+    CUDA_VISIBLE_DEVICES=<gpu> python forget_set_design/r2d/joint_decoder.py \\
         --results-dir <directory that contains run_001, run_002, ...> \\
         --data-dir <split directory> --output-dir <output directory> \\
         --epsilon inf,100,1000,2000
@@ -55,7 +55,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 R2D_DIR = REPO / "r2d_audit"
 sys.path.insert(0, str(R2D_DIR))
 sys.path.insert(0, str(R2D_DIR / "evaluation_scripts"))

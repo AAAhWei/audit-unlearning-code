@@ -5,7 +5,7 @@
 # The script does two steps for each configuration:
 #   1. It trains and unlearns all 20 combinations of 3 forget batches from 6.
 #   2. It audits the unlearned models with the joint sign-vector decoder (decoder B2).
-#      joint_decoder_r2d.py does this step. It calculates the phi scores with noise
+#      joint_decoder.py does this step. It calculates the phi scores with noise
 #      draws, predicts the deleted batches, and calculates the epsilon lower bounds.
 #
 # OFFICIAL_AUDIT=1 adds a third step. That step starts the two audit scripts of the
@@ -14,17 +14,45 @@
 # each run in the evaluation, thus their evaluation samples are not independent.
 #
 # Usage:
-#   CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/run_audits.sh <config>
+#   CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/r2d/run_audits.sh <config>
 #
 #   <gpu>     The physical GPU id. You select the GPU. The script does not examine it.
 #   <config>  C0          Use the uniform split directory of the paper.
-#             C1          Use a class-balanced random pool for each pool seed 0, 1, 2.
+#             C1          Use a class-balanced random pool for each pool seed 0 to 5.
 #             C1_seed<N>  Use a class-balanced random pool for pool seed N only.
+#             C2          Use the easy pool: the lowest difficulty scores in each class.
+#             C3          Use the hard pool: the highest difficulty scores in each class.
+#                         C2 and C3 do the batch assignment seeds 0, 1 and 2.
+#             C3.1        Use the global hard pool: the highest difficulty scores of
+#                         all points. The classes do not have the same number of
+#                         points. This configuration is not in spec.md.
+#                         C3.1 does the batch assignment seed 0 only.
+#             C4          Use the hard pool. Put the points of the same superclass
+#                         into the same batch (assignment label).
+#             C5          Use the hard pool. Put the points with a similar gradient
+#                         direction into the same batch (assignment grad).
+#             C6          Use the hard pool. Give each batch the same number of points
+#                         from each gradient cluster (assignment spread).
+#                         C4, C5 and C6 do the seed 0 only. C5 and C6 need the
+#                         directions file from compute_directions.py.
+#             C4.1, C5.1  Use the random pool of C1_seed<POOL_SEED> with the
+#                         assignment of C4 (label) or C5 (grad).
+#             C4.2, C5.2  Use the easy pool of C2 with the assignment of C4 or C5.
+#                         These four configurations are not in spec.md. They show if
+#                         the result of C4 and C5 needs the hard pool. They do the
+#                         seed 0 only.
+#             <config>_seed<N>
+#                         For C2 to C6 and their variants: use the same pool with the
+#                         batch assignment seed N only.
+#                         The results of the seed 0 have the names C2, C3 and C3_1.
+#                         The directory names use C3_1 because a period in the path
+#                         stops main.py.
+#                         These configurations need the scores file of run_scores.sh.
 #
 # Examples:
-#   CUDA_VISIBLE_DEVICES=4 forget_set_design/run_audits.sh C0
-#   CUDA_VISIBLE_DEVICES=4 forget_set_design/run_audits.sh C1
-#   DRY_RUN=1 CUDA_VISIBLE_DEVICES=4 forget_set_design/run_audits.sh C1
+#   CUDA_VISIBLE_DEVICES=4 forget_set_design/r2d/run_audits.sh C0
+#   CUDA_VISIBLE_DEVICES=4 forget_set_design/r2d/run_audits.sh C1
+#   DRY_RUN=1 CUDA_VISIBLE_DEVICES=4 forget_set_design/r2d/run_audits.sh C1
 #
 # DRY_RUN=1 prints the commands and does not start them.
 # The script skips each step that is complete. Use the same command to continue
@@ -49,11 +77,16 @@
 #   EVAL_SEED    Seed of the evaluation noise. [1]
 #   OFFICIAL_AUDIT  Set to 1 to start the audit scripts of the pipeline also. [0]
 #   THREADS      Number of CPU threads for each process. [4]
+#   SCORES_CSV   Scores file for C2 to C6.
+#                [/tmp2/enzo/audit-unlearning/scores/scores_r2d.csv]
+#   DIRECTIONS   Directions file for C5, C5.1, C5.2 and C6.
+#                [/tmp2/enzo/audit-unlearning/scores/directions_r2d.npy]
+#   POOL_SEED    Pool seed of the C1 pool that C4.1 and C5.1 use. [0]
 set -euo pipefail
 
 CONFIG=${1:-}
 if [ -z "$CONFIG" ]; then
-    sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
@@ -70,6 +103,9 @@ CALIB_SEED=${CALIB_SEED:-0}
 EVAL_SEED=${EVAL_SEED:-1}
 OFFICIAL_AUDIT=${OFFICIAL_AUDIT:-0}
 THREADS=${THREADS:-4}
+SCORES_CSV=${SCORES_CSV:-/tmp2/enzo/audit-unlearning/scores/scores_r2d.csv}
+DIRECTIONS=${DIRECTIONS:-/tmp2/enzo/audit-unlearning/scores/directions_r2d.npy}
+POOL_SEED=${POOL_SEED:-0}
 DRY_RUN=${DRY_RUN:-0}
 
 # spec.md section 5.3 sets these values. All configurations use the same values.
@@ -84,7 +120,7 @@ MICRO_BS=128
 N_COMBOS=20
 RUN_SUBDIR="bs_full_train_${TRAIN_EPOCHS}_unlearn_${UNLEARN_EPOCHS}_lr_${LR//./_}_comb3"
 
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 R2D_DIR="$REPO/r2d_audit"
 SPLITS=$(realpath "$REPO/certified_unlearning_plus_grad_based_methods/data/cifar100/data_split")
 
@@ -119,6 +155,7 @@ audit_one() {
     local NAME=$1 DATA=$2
     local BASE="$OUT_ROOT/$NAME"
     local RES="$BASE/$RUN_SUBDIR"
+    [[ "$BASE" != *.* ]] || die "The output directory $BASE contains a period. main.py cannot use this path."
     [ -d "$DATA/forget" ] || [ "$DRY_RUN" = "1" ] || die "$DATA does not contain a forget directory."
 
     echo
@@ -166,7 +203,7 @@ audit_one() {
         echo "[2/$N_STEPS] The joint decoder audit is complete. The script skips this step."
     else
         echo "[2/$N_STEPS] Audit with the joint decoder."
-        run python3 "$REPO/forget_set_design/joint_decoder_r2d.py" \
+        run python3 "$REPO/forget_set_design/r2d/joint_decoder.py" \
             --results-dir "$RES" --data-dir "$DATA" --output-dir "$BASE/joint" \
             --epsilon "$EPSILONS" --delta "$DELTA" --num-calib "$RELOADS" \
             --num-eval "$NUM_SAMPLES" --methods "$METHODS" --ci-delta "$CI_DELTA" \
@@ -201,20 +238,90 @@ c1_one() {
     if [ -d "$DATA/forget" ]; then
         echo "The split directory $DATA exists. The script uses it."
     else
-        run python3 "$REPO/forget_set_design/make_custom_split.py" \
+        run python3 "$REPO/forget_set_design/utils/make_custom_split.py" \
             --random --balanced --assign_seed "$SEED" --out_dir "$DATA" \
             --save_assignment "$SPLITS/assignment_random_rand_seed$SEED.csv"
     fi
     audit_one "C1_seed$SEED" "$DATA"
 }
 
+# Create the split directory for a pool from the difficulty scores if it does not
+# exist. Then audit it.
+# Arguments: <configuration without the seed, for example C3> <assignment seed>
+# The seed 0 uses the names without a seed. Thus the first C2 and C3 runs keep their names.
+pool_one() {
+    local CONF=$1 SEED=$2
+    local POOL ASSIGN
+    POOL=$(pool_of "$CONF")
+    ASSIGN=$(assignment_of "$CONF")
+    local NAME=$CONF SUFFIX=""
+    if [ "$SEED" != "0" ]; then NAME="${CONF}_seed$SEED"; SUFFIX="_seed$SEED"; fi
+    local TAG="r2d_${POOL}_${ASSIGN}$SUFFIX"
+    local EXTRA=()
+    if [ "$ASSIGN" = "grad" ] || [ "$ASSIGN" = "spread" ]; then EXTRA=(--directions "$DIRECTIONS"); fi
+    if [ "$POOL" = "random" ]; then
+        # The pool is the C1 pool. Thus only the batch of each point is different from C1.
+        local POOL_FILE="$SPLITS/assignment_random_rand_seed$POOL_SEED.csv"
+        [ -f "$POOL_FILE" ] || [ "$DRY_RUN" = "1" ] \
+            || die "The pool file $POOL_FILE does not exist. Start C1_seed$POOL_SEED first."
+        EXTRA+=(--pool-file "$POOL_FILE")
+        if [ "$POOL_SEED" != "0" ]; then
+            NAME="${NAME}_pool$POOL_SEED"; TAG="r2d_${POOL}${POOL_SEED}_${ASSIGN}$SUFFIX"
+        fi
+    fi
+    # The directory names must not contain a period. main.py cuts the checkpoint path
+    # at the first period to make the name of the unlearn run. Thus C3.1 uses C3_1.
+    NAME=${NAME//./_}
+    local DATA="$SPLITS/$(echo "${CONF//./_}" | tr '[:upper:]' '[:lower:]')_$TAG"
+    if [ -d "$DATA/forget" ]; then
+        echo "The split directory $DATA exists. The script uses it."
+    else
+        [ -f "$SCORES_CSV" ] || die "The scores file $SCORES_CSV does not exist. Start run_scores.sh first."
+        [ "$ASSIGN" != "grad" ] && [ "$ASSIGN" != "spread" ] || [ -f "$DIRECTIONS" ] \
+            || die "The directions file $DIRECTIONS does not exist. Start compute_directions.py first."
+        run python3 "$REPO/forget_set_design/utils/build_pools.py" --alg r2d --pool "$POOL" \
+            --assignment "$ASSIGN" --assign-seed "$SEED" --out-stem "assignment_$TAG" \
+            --scores-csv "$SCORES_CSV" --out-dir "$SPLITS" "${EXTRA[@]}"
+        run python3 "$REPO/forget_set_design/utils/make_custom_split.py" \
+            --assignment "$SPLITS/assignment_$TAG.csv" --out_dir "$DATA"
+    fi
+    audit_one "$NAME" "$DATA"
+}
+
+# Give the pool of a configuration: C2 to C6.
+pool_of() {
+    case "$1" in
+        C2|C4.2|C5.2) echo easy ;;
+        C3|C4|C5|C6)  echo hard ;;
+        C4.1|C5.1)    echo random ;;
+        C3.1)        echo global_hard ;;
+    esac
+}
+
+# Give the batch assignment of a configuration: C2 to C6.
+assignment_of() {
+    case "$1" in
+        C4|C4.1|C4.2) echo label ;;
+        C5|C5.1|C5.2) echo grad ;;
+        C6) echo spread ;;
+        *)  echo rand ;;
+    esac
+}
+
 cd "$R2D_DIR"
 [ "$DRY_RUN" = "1" ] || mkdir -p "$OUT_ROOT"
 case "$CONFIG" in
     C0)        audit_one C0 "$SPLITS/cifar100_uniform_bs_750_seed1" ;;
-    C1)        for S in 0 1 2; do c1_one "$S"; done ;;
+    C1)        for S in 0 1 2 3 4 5; do c1_one "$S"; done ;;
     C1_seed*)  S=${CONFIG#C1_seed}
                [[ "$S" =~ ^[0-9]+$ ]] || die "The configuration '$CONFIG' is not correct. Use C1_seed<N> with a number N."
                c1_one "$S" ;;
-    *)         die "The configuration '$CONFIG' is not known. Use C0, C1 or C1_seed<N>." ;;
+    C2|C3)     for S in 0 1 2; do pool_one "$CONFIG" "$S"; done ;;
+    C3.1|C4|C5|C6|C4.1|C4.2|C5.1|C5.2)
+               pool_one "$CONFIG" 0 ;;
+    C[2-6]_seed*|C3.1_seed*|C[45].[12]_seed*)
+               S=${CONFIG#*_seed}
+               [[ "$S" =~ ^[0-9]+$ ]] || die "The configuration '$CONFIG' is not correct. Use <config>_seed<N> with a number N."
+               pool_one "${CONFIG%_seed*}" "$S" ;;
+    *)         die "The configuration '$CONFIG' is not known. Use C0 to C6, C3.1, C4.1, C4.2, C5.1, C5.2 or <config>_seed<N>." ;;
 esac

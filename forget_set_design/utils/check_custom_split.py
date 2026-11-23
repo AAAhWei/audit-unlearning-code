@@ -18,7 +18,7 @@ The script does these checks:
      data_cache module and the R2D function build_train_pickle.
 
 Do this check on the CPU. If a GPU is visible, the JAX loader allocates GPU memory.
-    CUDA_VISIBLE_DEVICES="" python forget_set_design/check_custom_split.py \
+    CUDA_VISIBLE_DEVICES="" python forget_set_design/utils/check_custom_split.py \
         --split <split directory> --reference <reference split directory>
 """
 
@@ -36,7 +36,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 SPLITS = ("train", "val", "test", "retain", "forget")
 FAILED: list[str] = []
 

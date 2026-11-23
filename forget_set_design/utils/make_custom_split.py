@@ -30,8 +30,8 @@ Select one source for the assignment:
                             Add --balanced to get the same number of points for each class.
 
 Usage (from the repository root):
-    python forget_set_design/make_custom_split.py --assignment a.csv --out_dir <split dir>
-    python forget_set_design/make_custom_split.py --paper_uniform --out_dir <split dir>
+    python forget_set_design/utils/make_custom_split.py --assignment a.csv --out_dir <split dir>
+    python forget_set_design/utils/make_custom_split.py --paper_uniform --out_dir <split dir>
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from pathlib import Path
 import numpy as np
 
 DEFAULT_DATA_DIR = (
-    Path(__file__).resolve().parent.parent
+    Path(__file__).resolve().parents[2]
     / "certified_unlearning_plus_grad_based_methods" / "data" / "cifar100"
 )
 INDEX_FILE = "split_indices.npz"
