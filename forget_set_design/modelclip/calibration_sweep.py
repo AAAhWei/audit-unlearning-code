@@ -2,7 +2,7 @@
 """
 This script audits the model-clipping runs of run_audits.sh with the joint decoders.
 
-The script is an adapter, as r2d/joint_decoder.py and r2d/calib_sweep.py are for R2D:
+The script is an adapter, as r2d/calibration_sweep.py is for R2D:
     - The decoders b2, ours_a and ours_b are in pooled_linear_auditor/pooled_linear.py.
     - The model, the data loader and the epsilon test are those of
       certified_unlearning_plus_grad_based_methods/.
@@ -44,7 +44,7 @@ Output files in --output-dir:
                             script makes it from all sweep_step*.csv files in the directory.
 
 Usage (from the repository root):
-    CUDA_VISIBLE_DEVICES=<gpu> python forget_set_design/modelclip/calib_sweep.py \\
+    CUDA_VISIBLE_DEVICES=<gpu> python forget_set_design/modelclip/calibration_sweep.py \\
         --results-dir <directory that contains the run directories> \\
         --output-dir <output directory> --steps 10,20,30
 """

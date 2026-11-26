@@ -50,8 +50,8 @@ R2D_DIR = REPO / "r2d_audit"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utils"))
 
-from compute_scores import load_train_points  # noqa: E402
 from make_custom_split import DEFAULT_DATA_DIR  # noqa: E402
+from score_utils import load_train_points  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,7 +122,8 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    images, labels, global_idx = load_train_points(args)
+    images, labels, global_idx = load_train_points(Path(args.data_dir), Path(args.raw_train_dir),
+                                                   args.val_split, args.split_seed, tag="directions")
     n = len(images)
 
     # step_000.pt contains the weights before training. The direction does not use it.

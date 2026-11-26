@@ -52,7 +52,8 @@ R2D_DIR = REPO / "r2d_audit"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utils"))
 
-from make_custom_split import DEFAULT_DATA_DIR, INDEX_FILE, load_batch_dir, paper_holdout  # noqa: E402
+from make_custom_split import DEFAULT_DATA_DIR  # noqa: E402
+from score_utils import load_train_points, renyi_orders  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,15 +88,6 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------------------
 # Score formula
 # ---------------------------------------------------------------------------------------
-def renyi_orders(alpha: float, n_steps: int) -> np.ndarray:
-    """Return o_0 to o_T. o_0 = alpha and o_t = o_p(o_{t-1}) with p = 3 * T."""
-    p = 3.0 * n_steps
-    orders = [float(alpha)]
-    for _ in range(n_steps):
-        orders.append(p / (p - 1.0) * orders[-1] - 1.0 / p)
-    return np.array(orders)
-
-
 def step_weights(alpha: float, n_steps: int, sigma: float, order_shift: int = 0) -> np.ndarray:
     """
     Return the weight of ||g(x, w_t)||^2 for t = 1 to T in the full-batch score.
@@ -108,40 +100,6 @@ def step_weights(alpha: float, n_steps: int, sigma: float, order_shift: int = 0)
     order = renyi_orders(alpha, n_steps)[t - order_shift]
     c_t = (1.0 / (alpha - 1.0)) * ((p - 1.0) / p) ** (t + 1)
     return p / (2.0 * sigma ** 2) * c_t * (order ** 2 - order)
-
-
-# ---------------------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------------------
-def load_train_points(args: argparse.Namespace):
-    """
-    Read the training points of the split directory.
-    Return (images uint8 NHWC, labels, global indices), in ascending global index order.
-    """
-    data_dir = Path(args.data_dir)
-    images, labels = load_batch_dir(data_dir / "train")
-
-    index_file = data_dir / INDEX_FILE
-    if index_file.exists():
-        global_idx = np.load(index_file)["train"].astype(np.int64)
-        source = INDEX_FILE
-    else:
-        # The split script of the paper writes no index file. Calculate the row order again.
-        raw_n = len(images) + int(round(args.val_split * len(images) / (1.0 - args.val_split)))
-        global_idx = paper_holdout(raw_n, args.val_split, args.split_seed)["train_order"].astype(np.int64)
-        source = "the random draws of split_cifar100_train.py"
-    if len(global_idx) != len(images):
-        raise SystemExit(f"ERROR: {len(images)} training rows but {len(global_idx)} global indices.")
-
-    # Make sure that each row is the point with that global index.
-    raw_images, raw_labels = load_batch_dir(Path(args.raw_train_dir))
-    if not (np.array_equal(raw_images[global_idx], images) and np.array_equal(raw_labels[global_idx], labels)):
-        raise SystemExit("ERROR: The training rows do not agree with the global indices. "
-                         "Examine --data-dir, --raw-train-dir, --val-split and --split-seed.")
-    print(f"[scores] {len(images)} training points. Global indices from {source}. The check passed.")
-
-    order = np.argsort(global_idx)
-    return images[order], labels[order].astype(np.int64), global_idx[order]
 
 
 # ---------------------------------------------------------------------------------------
@@ -220,7 +178,8 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    images, labels, global_idx = load_train_points(args)
+    images, labels, global_idx = load_train_points(Path(args.data_dir), Path(args.raw_train_dir),
+                                                   args.val_split, args.split_seed)
     n = len(images)
 
     # step_000.pt contains the weights before training. The score does not use it.

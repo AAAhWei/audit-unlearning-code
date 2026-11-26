@@ -139,7 +139,7 @@ CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/r2d/run_audits.sh C1    # pool seed
 - Settings: claimed epsilon `inf,100,1000,2000`, delta `1e-3`, 100 calibration noise
   draws for each configuration, 500 evaluation trials, `ci-delta` 0.05, calibration
   seed 0, evaluation seed 1.
-- Results: `/tmp2/enzo/audit-unlearning/r2d/<config>/joint/joint_summary.csv`.
+- Results: `/tmp2/enzo/audit-unlearning/r2d/<config>/sweep/sweep_table.csv`.
 
 ### Decoders
 
@@ -151,7 +151,7 @@ The branch is rebased on `origin/pooled-linear-auditor-mvp`, which adds
   decoder. That is not correct. The script fits one Gaussian for each point and each
   run, adds the log-likelihoods of all points, and selects the run with the largest
   sum. This is Algorithm 3 of the paper.
-- **`joint_decoder.py` is the adapter** between the R2D runs and
+- **`calibration_sweep.py` is the adapter** between the R2D runs and
   `pooled_linear_auditor/pooled_linear.py`. It calculates the phi scores with the
   functions of `r2d_audit/`, and it uses the epsilon test in
   `r2d_audit/cum_runs_eps_lab.py`. `run_audits.sh` starts it in step 2.
@@ -186,7 +186,7 @@ CUDA_VISIBLE_DEVICES=<gpu> forget_set_design/r2d/run_scores.sh
 ## Step 2 (§5.5): score check — the gate fails for R2D
 
 ```bash
-python3 forget_set_design/r2d/validate_score.py --joint-dir <C1 joint dir> \
+python3 forget_set_design/r2d/validate_score.py --audit-dir <C1 sweep dir> \
     --split-dir <C1 split dir> --scores-csv <scores_r2d.csv> --out-dir <dir>
 ```
 

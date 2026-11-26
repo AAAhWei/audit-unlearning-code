@@ -3,7 +3,9 @@
 #
 # For each of the 20 combinations of 3 of 6 forget batches, the script trains one model
 # and then does TRIALS unlearning trials. Each trial has its own noise seed. Then the
-# script audits the trials with the joint decoders b2, ours_a and ours_b.
+# script audits the trials with the joint decoders b2, ours_a and ours_b, for different
+# calibration budgets. A calibration budget is the number of calibration trials for
+# each sign vector.
 #
 # The training and the unlearning are those of
 # certified_unlearning_plus_grad_based_methods/. This script does not change that code.
@@ -14,8 +16,28 @@
 #   <gpu>     The physical GPU id. You select the GPU. The script does not examine it.
 #             The script uses one GPU.
 #   <config>  MC1    Random pool, random batches. The split is that of C1_seed0.
+#             MC2    Easy pool, random batches.
+#             MC3    Hard pool, random batches.
+#             MC3.1  Global hard pool, random batches. The pool is the highest
+#                    difficulty scores of all points. The classes do not have equal
+#                    numbers of points.
+#             MC4    Hard pool, batches of the assignment "label".
 #             MC4.1  Random pool, batches of the assignment "label". The split is that
 #                    of C4.1.
+#             MC4.2  Easy pool, batches of the assignment "label".
+#             MC5    Hard pool, batches of the assignment "grad".
+#             MC5.1  Random pool (that of MC1), batches of the assignment "grad".
+#             MC5.2  Easy pool, batches of the assignment "grad".
+#             MC6    Hard pool, batches of the assignment "spread".
+#             MC1_seed<n>  A different random pool, n = 1 to 5. The split is that of
+#                          C1_seed<n>. MC1 is the seed 0.
+#             MC2_seed<n>, MC3_seed<n>
+#                          The pool of MC2 or MC3 with a different random selection
+#                          of the batches, n = 1 to 9.
+#             The hard pool and the easy pool use the difficulty scores of model
+#             clipping. Start run_scores.sh first. The assignments "grad" and "spread"
+#             use the gradient directions of compute_directions.py.
+#             The script creates the split directory if it does not exist.
 #             Set DATA to use a different split directory with a different name.
 #   <first>   The first combination, 0 to 19. [0]
 #   <count>   The number of combinations. [all combinations from <first>]
@@ -26,6 +48,8 @@
 #   CUDA_VISIBLE_DEVICES=4 forget_set_design/modelclip/run_audits.sh MC1 0 10
 #   CUDA_VISIBLE_DEVICES=5 forget_set_design/modelclip/run_audits.sh MC1 10 10
 #   DRY_RUN=1 CUDA_VISIBLE_DEVICES=4 forget_set_design/modelclip/run_audits.sh MC4.1
+#   CUDA_VISIBLE_DEVICES=4 forget_set_design/modelclip/run_audits.sh MC1_seed1
+#   STEPS=20 OUT_NAME=audit_step20 CUDA_VISIBLE_DEVICES=4 forget_set_design/modelclip/run_audits.sh MC1
 #
 # TEST=1 measures the time and the disk space. It does combination 0 only, with 2
 # trials, in the directory <config>_test. It does not start the audit.
@@ -37,6 +61,11 @@
 # The audit starts only when all 20 combinations are complete. Thus you can divide the
 # combinations between two GPUs, as in the examples. Then start the command with no
 # <first> again to do the audit.
+# To audit the trials again with different settings, start the script again with
+# those settings. The script skips the combinations and does only the audit. It keeps
+# the scores of each step in a file. If that file exists, the script reads it and does
+# only the fits. Set FORCE=1 to calculate the scores again. Use a different OUT_NAME
+# for each group of settings that you want to keep.
 #
 # Output files in $OUT_ROOT/<config>/ (C4.1 becomes MC4_1):
 #   config_used.yaml          The config file of the runs.
@@ -45,8 +74,11 @@
 #   logs/combo_<n>.out        The output of the start of each combination.
 #   audit/sweep_table.csv     The mean, the standard deviation, the minimum and the
 #                             maximum of the lower bound for each cell.
+#   audit/sweep_step<s>.csv   One row for each fit of a decoder at step <s>.
+#   audit/sweep_step<s>.json  The settings of that file.
 #   audit/scores_step<s>.npz  The scores of all trials at step <s>.
 #   audit/audit.log           The full output of the audit.
+# OUT_NAME changes the name of the directory audit/.
 #
 # Settings are environment variables. The default values are in brackets.
 #   ENV_BIN       Directory of the python environment.
@@ -55,6 +87,10 @@
 #   SPLITS        Directory of the split directories.
 #                 [/tmp2/enzo/audit-unlearning/data/cifar100/data_split]
 #   DATA          Split directory. The default is the split of <config>.
+#   SCORES_CSV    Scores file of model clipping, for the hard pool and the easy pool.
+#                 [/tmp2/enzo/audit-unlearning/scores/scores_modelclip.csv]
+#   DIRECTIONS    Directions file of model clipping, for MC5, MC5.1, MC5.2 and MC6.
+#                 [/tmp2/enzo/audit-unlearning/scores/directions_modelclip.npy]
 #   BASE_CONFIG   Config file of the pipeline. This script changes only the stop step,
 #                 the checkpoints to keep and the log directory.
 #                 [certified_unlearning_plus_grad_based_methods/configs/exp_cifar100_chg7.yaml]
@@ -63,20 +99,23 @@
 #                 this number. One checkpoint is approximately 2 MB. [10]
 #   STEPS         List of the steps to audit. [10,20,30]
 #   TRIALS        Number of unlearning trials for each combination. [150]
-#   NUM_CALIB     Number of calibration trials for each combination. [50]
-#   NUM_EVAL      Number of evaluation trials for each combination. [100]
-#   BUDGETS       List of calibration budgets. [2,5,10,20,50]
+#   NUM_CALIB     Number of calibration trials for each combination. The audit uses
+#                 the first trials for the calibration. [50]
+#   NUM_EVAL      Number of evaluation trials for each combination. The audit uses
+#                 the trials after the calibration trials. [100]
+#   PARALLEL      Number of combinations that run at the same time on the GPU. [1]
+#   OUT_NAME      Name of the audit directory in $OUT_ROOT/<config>/. [audit]
+#   BUDGETS       List of calibration budgets. The maximum is NUM_CALIB. [2,5,10,20,50]
 #   MAX_GROUPS    Maximum number of fits for one budget. [10]
 #   METHODS       List of decoder methods. [b2,ours_a,ours_b]
 #   DESIGN_PAIRS  List of calibration designs. 0 uses all sign vectors. N uses N
 #                 complement pairs (2 * N sign vectors), for ours_b only. [0]
 #   CI_DELTA      Confidence parameter of the lower bounds. [0.05]
-#   PARALLEL      Number of combinations that run at the same time on the GPU. [1]
 set -euo pipefail
 
 CONFIG=${1:-}
 if [ -z "$CONFIG" ]; then
-    sed -n '2,74p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,113p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
@@ -87,18 +126,22 @@ ENV_BIN=${ENV_BIN:-/tmp2/enzo/miniconda3/envs/unlearn-audit/bin}
 OUT_ROOT=${OUT_ROOT:-/tmp2/enzo/audit-unlearning/modelclip}
 SPLITS=${SPLITS:-/tmp2/enzo/audit-unlearning/data/cifar100/data_split}
 DATA=${DATA:-}
+SCORES_CSV=${SCORES_CSV:-/tmp2/enzo/audit-unlearning/scores/scores_modelclip.csv}
+DIRECTIONS=${DIRECTIONS:-/tmp2/enzo/audit-unlearning/scores/directions_modelclip.npy}
 BASE_CONFIG=${BASE_CONFIG:-$PIPELINE/configs/exp_cifar100_chg7.yaml}
 MAX_STEP=${MAX_STEP:-30}
 KEEP_EVERY=${KEEP_EVERY:-10}
 STEPS=${STEPS:-10,20,30}
 NUM_CALIB=${NUM_CALIB:-50}
 NUM_EVAL=${NUM_EVAL:-100}
+PARALLEL=${PARALLEL:-1}
+OUT_NAME=${OUT_NAME:-audit}
 BUDGETS=${BUDGETS:-2,5,10,20,50}
 MAX_GROUPS=${MAX_GROUPS:-10}
 METHODS=${METHODS:-b2,ours_a,ours_b}
 DESIGN_PAIRS=${DESIGN_PAIRS:-0}
 CI_DELTA=${CI_DELTA:-0.05}
-PARALLEL=${PARALLEL:-1}
+FORCE=${FORCE:-0}
 TEST=${TEST:-0}
 DRY_RUN=${DRY_RUN:-0}
 
@@ -118,16 +161,66 @@ GPUS=${CUDA_VISIBLE_DEVICES:-}
 [ -f "$BASE_CONFIG" ] || die "The config file $BASE_CONFIG does not exist."
 [[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || die "PARALLEL must be a positive integer. The value is '$PARALLEL'."
 
+export PATH="$ENV_BIN:$PATH"
+
+# Create the split directory for a pool from the difficulty scores of model clipping
+# if it does not exist. Set DATA to that directory.
+# Arguments: <pool: hard, easy, global_hard or random>
+#            <assignment: rand, label, grad or spread> [<seed of the batch selection>]
+pool_split() {
+    local POOL=$1 ASSIGN=$2 SEED=${3:-0}
+    local TAG="modelclip_${POOL}_${ASSIGN}"
+    if [ "$SEED" != "0" ]; then TAG="${TAG}_seed$SEED"; fi
+    # The name of the split directory does not include the seed part of <config>.
+    local PREFIX=${CONFIG%_seed*}
+    DATA="$SPLITS/$(echo "${PREFIX//./_}" | tr '[:upper:]' '[:lower:]')_$TAG"
+    if [ -d "$DATA/forget" ]; then return 0; fi
+    [ -f "$SCORES_CSV" ] || die "The scores file $SCORES_CSV does not exist. Start modelclip/run_scores.sh first."
+    local EXTRA=()
+    if [ "$ASSIGN" = "grad" ] || [ "$ASSIGN" = "spread" ]; then
+        [ -f "$DIRECTIONS" ] || die "The directions file $DIRECTIONS does not exist. Start modelclip/compute_directions.py first."
+        EXTRA+=(--directions "$DIRECTIONS")
+    fi
+    if [ "$POOL" = "random" ]; then
+        # The pool is that of MC1. Thus only the batch of each point is different from MC1.
+        local POOL_FILE="$SPLITS/assignment_random_rand_seed0.csv"
+        [ -f "$POOL_FILE" ] || die "The pool file $POOL_FILE does not exist."
+        EXTRA+=(--pool-file "$POOL_FILE")
+    fi
+    local BUILD=(python3 "$REPO/forget_set_design/utils/build_pools.py" --alg modelclip --pool "$POOL"
+                 --assignment "$ASSIGN" --assign-seed "$SEED" --out-stem "assignment_$TAG"
+                 --scores-csv "$SCORES_CSV" --out-dir "$SPLITS" "${EXTRA[@]}")
+    local SPLIT=(python3 "$REPO/forget_set_design/utils/make_custom_split.py"
+                 --assignment "$SPLITS/assignment_$TAG.csv" --out_dir "$DATA")
+    echo "+ ${BUILD[*]}"
+    echo "+ ${SPLIT[*]}"
+    if [ "$DRY_RUN" = "1" ]; then return 0; fi
+    # These two commands use the CPU only.
+    CUDA_VISIBLE_DEVICES="" "${BUILD[@]}"
+    CUDA_VISIBLE_DEVICES="" "${SPLIT[@]}"
+}
+
 if [ -z "$DATA" ]; then
     case "$CONFIG" in
         MC1)   DATA="$SPLITS/c1_random_rand_seed0" ;;
         MC4.1) DATA="$SPLITS/c4_1_r2d_random_label" ;;
-        MC3|MC4) die "$CONFIG is not available. It needs the difficulty scores of model clipping." ;;
-        *) die "The configuration '$CONFIG' is not known. Use MC1 or MC4.1, or set DATA." ;;
+        MC2)   pool_split easy rand ;;
+        MC3)   pool_split hard rand ;;
+        MC4)   pool_split hard label ;;
+        MC4.2) pool_split easy label ;;
+        MC5)   pool_split hard grad ;;
+        MC5.1) pool_split random grad ;;
+        MC5.2) pool_split easy grad ;;
+        MC6)   pool_split hard spread ;;
+        MC3.1) pool_split global_hard rand ;;
+        MC1_seed[1-5])      DATA="$SPLITS/c1_random_rand_seed${CONFIG#MC1_seed}" ;;
+        MC2_seed[1-9])      pool_split easy rand "${CONFIG#MC2_seed}" ;;
+        MC3_seed[1-9])      pool_split hard rand "${CONFIG#MC3_seed}" ;;
+        *) die "The configuration '$CONFIG' is not known. Use MC1 to MC6, MC3.1, MC4.1, MC4.2, MC5.1, MC5.2, MC1_seed<n>, MC2_seed<n> or MC3_seed<n>, or set DATA." ;;
     esac
 fi
-[ -d "$DATA/forget" ] || die "$DATA does not contain a forget directory."
-[ -d "$DATA/retain" ] || die "$DATA does not contain a retain directory."
+[ -d "$DATA/forget" ] || [ "$DRY_RUN" = "1" ] || die "$DATA does not contain a forget directory."
+[ -d "$DATA/retain" ] || [ "$DRY_RUN" = "1" ] || die "$DATA does not contain a retain directory."
 
 FIRST=${2:-0}
 COUNT=${3:-$((N_COMBOS - FIRST))}
@@ -153,7 +246,6 @@ BASE="$OUT_ROOT/$NAME"
 RUNS="$BASE/runs"
 USED="$BASE/config_used.yaml"
 
-export PATH="$ENV_BIN:$PATH"
 export PYTHONUNBUFFERED=1
 export WANDB_MODE=offline
 # JAX then allocates GPU memory when it needs the memory, not all at the start.
@@ -281,17 +373,23 @@ if [ "$DRY_RUN" != "1" ]; then
     done
 fi
 
-OUT="$BASE/audit"
-CMD=(python3 "$REPO/forget_set_design/modelclip/calib_sweep.py"
+# The audit does not train a model and it does no unlearning trial. It does not change
+# the files of the trials.
+OUT="$BASE/$OUT_NAME"
+CMD=(python3 "$REPO/forget_set_design/modelclip/calibration_sweep.py"
      --results-dir "$RUNS" --output-dir "$OUT" --steps "$STEPS"
      --num-calib "$NUM_CALIB" --num-eval "$NUM_EVAL" --budgets "$BUDGETS"
      --max-groups "$MAX_GROUPS" --methods "$METHODS" --design-pairs "$DESIGN_PAIRS"
      --ci-delta "$CI_DELTA" --config-id "$NAME")
+if [ "$FORCE" = "1" ]; then CMD+=(--force); fi
+
+echo "=== $NAME: audit  $(date '+%F %T')"
 echo "+ ${CMD[*]}"
 echo "  log: $OUT/audit.log"
 if [ "$DRY_RUN" = "1" ]; then exit 0; fi
 
 mkdir -p "$OUT"
-"${CMD[@]}" 2>&1 | tee -a "$OUT/audit.log"
-[ "${PIPESTATUS[0]}" = "0" ] || die "The audit failed. Read $OUT/audit.log."
+if ! "${CMD[@]}" 2>&1 | tee -a "$OUT/audit.log"; then
+    die "The audit failed. Read $OUT/audit.log."
+fi
 echo "=== $NAME: audit results: $OUT/sweep_table.csv"

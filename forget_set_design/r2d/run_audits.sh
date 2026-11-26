@@ -4,9 +4,13 @@
 #
 # The script does two steps for each configuration:
 #   1. It trains and unlearns all 20 combinations of 3 forget batches from 6.
-#   2. It audits the unlearned models with the joint sign-vector decoder (decoder B2).
-#      joint_decoder.py does this step. It calculates the phi scores with noise
-#      draws, predicts the deleted batches, and calculates the epsilon lower bounds.
+#   2. It audits the unlearned models with the joint sign-vector decoders b2, ours_a
+#      and ours_b, for different calibration budgets. calibration_sweep.py does this
+#      step. It calculates the phi scores with noise draws, predicts the deleted
+#      batches, and calculates the epsilon lower bounds. A calibration budget is the
+#      number of calibration noise draws for each sign vector. b2 with the full budget
+#      is the audit of the paper.
+#      One calibration seed for one claimed epsilon is approximately 3 minutes.
 #
 # OFFICIAL_AUDIT=1 adds a third step. That step starts the two audit scripts of the
 # pipeline (evaluate_combination_models.py, evaluate_prediction_cumulative_model.py).
@@ -53,28 +57,52 @@
 #   CUDA_VISIBLE_DEVICES=4 forget_set_design/r2d/run_audits.sh C0
 #   CUDA_VISIBLE_DEVICES=4 forget_set_design/r2d/run_audits.sh C1
 #   DRY_RUN=1 CUDA_VISIBLE_DEVICES=4 forget_set_design/r2d/run_audits.sh C1
+#   EPSILONS=10,30,100 CUDA_VISIBLE_DEVICES=4 forget_set_design/r2d/run_audits.sh C4
 #
 # DRY_RUN=1 prints the commands and does not start them.
-# The script skips each step that is complete. Use the same command to continue
-# after an interruption.
-# The script writes the results to $OUT_ROOT/<config>/joint/joint_summary.csv.
-# With OFFICIAL_AUDIT=1, it also writes $OUT_ROOT/<config>/audit/rho_audit_summary.csv.
+# The script skips the training if it is complete, and the audit skips each claimed
+# epsilon that is complete with the same settings. Use the same command to continue
+# after an interruption. Set FORCE=1 to do the audit of all values again.
+#
+# Output files in $OUT_ROOT/<config>/ (C4.1 becomes C4_1):
+#   sweep/sweep_table.csv        The results: the mean, the standard deviation, the
+#                                minimum and the maximum of the lower bound for each
+#                                claimed epsilon, decoder, design and budget.
+#                                The audit of the paper is the row of joint_b2 with
+#                                20 configurations and the budget RELOADS.
+#   sweep/sweep_eps<value>.csv   One row for each fit of a decoder.
+#   sweep/sweep_eps<value>.json  The settings of that file.
+#   sweep/scores_eps<value>.npz  The scores of each forget point. validate_score.py
+#                                reads this file.
+#   sweep/sweep.log              The full output of the audit.
+#   audit/rho_audit_summary.csv  The results of the pipeline audit, with OFFICIAL_AUDIT=1.
+# Results from before the merge of the two audit scripts also have a directory joint/
+# with joint_summary.csv. Its values are the same as the b2 row with the full budget.
 #
 # Settings are environment variables. The default values are in brackets.
 #   ENV_BIN      Directory of the python environment.
 #                [/tmp2/enzo/miniconda3/envs/unlearn-audit/bin]
 #   OUT_ROOT     Root directory for the results. [/tmp2/enzo/audit-unlearning/r2d]
 #   NUM_JOBS     Number of parallel runs on each GPU. [2]
-#   EPSILONS     List of claimed epsilon values. [inf,100,1000,2000]
+#   EPSILONS     List of claimed epsilon values. inf adds no noise. [inf,100,1000,2000]
+#                The budgets are useful only where the lower bound is not at its
+#                maximum. For C4, C5 and their variants, add lower values, for
+#                example 10,30,100.
 #   DELTA        Delta for the noise calibration. [1e-3]
 #                The paper does not give its delta value.
-#   RELOADS      Number of calibration noise draws for each model. [100]
+#   RELOADS      Number of calibration noise draws for each model and each
+#                calibration seed. [100]
 #   NUM_SAMPLES  Number of evaluation trials in the audit. [500]
 #   CI_DELTA     Confidence parameter of the lower bounds. [0.05]
-#   METHODS      List of decoder methods: b2, ours_a, ours_b. [b2]
+#   METHODS      List of decoder methods: b2, ours_a, ours_b. [b2,ours_a,ours_b]
 #                b2 is the decoder of the paper.
-#   CALIB_SEED   Seed of the calibration noise. [0]
+#   BUDGETS      List of calibration budgets. The maximum is RELOADS. [2,10,100]
+#   MAX_GROUPS   Maximum number of fits for one budget and one calibration seed. [10]
+#   DESIGN_PAIRS List of calibration designs. 0 uses all sign vectors. N uses N
+#                complement pairs (2 * N sign vectors), for ours_b only. [0,5]
+#   CALIB_SEED   List of the seeds of the calibration noise. [0]
 #   EVAL_SEED    Seed of the evaluation noise. [1]
+#   FORCE        Set to 1 to do the audit of all claimed epsilon values again. [0]
 #   OFFICIAL_AUDIT  Set to 1 to start the audit scripts of the pipeline also. [0]
 #   THREADS      Number of CPU threads for each process. [4]
 #   SCORES_CSV   Scores file for C2 to C6.
@@ -86,7 +114,7 @@ set -euo pipefail
 
 CONFIG=${1:-}
 if [ -z "$CONFIG" ]; then
-    sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,112p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
@@ -98,7 +126,7 @@ DELTA=${DELTA:-1e-3}
 RELOADS=${RELOADS:-100}
 NUM_SAMPLES=${NUM_SAMPLES:-500}
 CI_DELTA=${CI_DELTA:-0.05}
-METHODS=${METHODS:-b2}
+METHODS=${METHODS:-b2,ours_a,ours_b}
 CALIB_SEED=${CALIB_SEED:-0}
 EVAL_SEED=${EVAL_SEED:-1}
 OFFICIAL_AUDIT=${OFFICIAL_AUDIT:-0}
@@ -107,6 +135,10 @@ SCORES_CSV=${SCORES_CSV:-/tmp2/enzo/audit-unlearning/scores/scores_r2d.csv}
 DIRECTIONS=${DIRECTIONS:-/tmp2/enzo/audit-unlearning/scores/directions_r2d.npy}
 POOL_SEED=${POOL_SEED:-0}
 DRY_RUN=${DRY_RUN:-0}
+BUDGETS=${BUDGETS:-2,10,100}
+MAX_GROUPS=${MAX_GROUPS:-10}
+DESIGN_PAIRS=${DESIGN_PAIRS:-0,5}
+FORCE=${FORCE:-0}
 
 # spec.md section 5.3 sets these values. All configurations use the same values.
 # The paper (arXiv 2607.05898, Appendix G.2) uses T = 40 and K = 5 with full-batch
@@ -195,27 +227,32 @@ audit_one() {
         fi
     fi
 
-    # Step 2: joint sign-vector decoder (decoder B2).
-    # An empty marker file records that this step is complete for these settings.
-    local SETTINGS="eps${EPSILONS}_delta${DELTA}_calib${RELOADS}_eval${NUM_SAMPLES}"
-    local JOINT_TAG="$BASE/joint/.done_${SETTINGS}_${METHODS}_seeds${CALIB_SEED}_${EVAL_SEED}"
-    if [ -f "$JOINT_TAG" ]; then
-        echo "[2/$N_STEPS] The joint decoder audit is complete. The script skips this step."
-    else
-        echo "[2/$N_STEPS] Audit with the joint decoder."
-        run python3 "$REPO/forget_set_design/r2d/joint_decoder.py" \
-            --results-dir "$RES" --data-dir "$DATA" --output-dir "$BASE/joint" \
-            --epsilon "$EPSILONS" --delta "$DELTA" --num-calib "$RELOADS" \
-            --num-eval "$NUM_SAMPLES" --methods "$METHODS" --ci-delta "$CI_DELTA" \
-            --calib-seed "$CALIB_SEED" --eval-seed "$EVAL_SEED" \
-            --config-id "$NAME" --device cuda:0
-        if [ "$DRY_RUN" != "1" ]; then touch "$JOINT_TAG"; fi
+    # Step 2: the audit with the joint sign-vector decoders, for each calibration budget.
+    # calibration_sweep.py skips each claimed epsilon that is complete with the same settings.
+    echo "[2/$N_STEPS] Audit with the joint decoders. Log file: $BASE/sweep/sweep.log"
+    local AUDIT_CMD=(python3 "$REPO/forget_set_design/r2d/calibration_sweep.py"
+        --results-dir "$RES" --data-dir "$DATA" --output-dir "$BASE/sweep"
+        --epsilon "$EPSILONS" --delta "$DELTA" --budgets "$BUDGETS"
+        --num-calib "$RELOADS" --max-groups "$MAX_GROUPS" --calib-seeds "$CALIB_SEED"
+        --eval-seed "$EVAL_SEED" --num-eval "$NUM_SAMPLES" --methods "$METHODS"
+        --design-pairs "$DESIGN_PAIRS" --ci-delta "$CI_DELTA" --config-id "$NAME"
+        --device cuda:0)
+    if [ "$FORCE" = "1" ]; then AUDIT_CMD+=(--force); fi
+    echo "+ ${AUDIT_CMD[*]}"
+    if [ "$DRY_RUN" != "1" ]; then
+        mkdir -p "$BASE/sweep"
+        # Python then writes each line to the log file immediately.
+        if ! PYTHONUNBUFFERED=1 "${AUDIT_CMD[@]}" 2>&1 | tee -a "$BASE/sweep/sweep.log"; then
+            die "The audit failed. Read $BASE/sweep/sweep.log."
+        fi
     fi
-    echo "=== $NAME: joint decoder results: $BASE/joint/joint_summary.csv"
+    echo "=== $NAME: audit results: $BASE/sweep/sweep_table.csv"
+    local STEP=2
 
-    # Step 3 (only with OFFICIAL_AUDIT=1): the audit scripts of the pipeline.
+    # Last step (only with OFFICIAL_AUDIT=1): the audit scripts of the pipeline.
     if [ "$OFFICIAL_AUDIT" = "1" ]; then
-        echo "[3/$N_STEPS] Start the audit scripts of the pipeline."
+        STEP=$((STEP + 1))
+        echo "[$STEP/$N_STEPS] Start the audit scripts of the pipeline."
         run python3 evaluation_scripts/evaluate_combination_models.py \
             --results-dir "$RES" --data-dir "$DATA" --model-type unlearnt \
             --epsilon "$EPSILONS" --delta "$DELTA" --num-shadow-reloads "$RELOADS" \
