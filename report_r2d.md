@@ -99,7 +99,6 @@ A design is one pool with one assignment, for example "hard pool, label assignme
 | easy        | random     | 3    | 0.02    | 0.79 \[0.77, 0.82\] | 1.62 \[1.58, 1.65\] |
 | hard        | random     | 3    | 0.05    | 1.16 \[1.14, 1.18\] | 2.12 \[2.03, 2.18\] |
 | global hard | random     | 1    | 0.03    | 0.43                | 0.78                |
-| hard        | spread     | 1    | 0.04    | 1.41                | 2.49                |
 
 
 The cells give the mean [min, max] of the runs. With ε = ∞ each configuration is at the maximum 4.03.
@@ -183,6 +182,7 @@ information many times, and that information does not identify the batch.
 | hard   | random     | 0.05     | 1.16     | 2.12     |
 | hard   | label      | **2.55** | 4.03     | 4.03     |
 | hard   | grad       | 2.15     | 4.03     | 4.03     |
+| hard   | spread     | 0.04     | 1.41     | 2.49     |
 | random | random     | 0.02     | 0.82     | 1.73     |
 | random | label      | **2.39** | 4.03     | 4.03     |
 | random | grad       | 1.93     | 4.03     | 4.03     |
@@ -191,7 +191,7 @@ information many times, and that information does not identify the batch.
 | easy   | grad       | 1.78     | 4.03     | 4.03     |
 
 
-The value 4.03 is the maximum of the test. Each label and grad row is one run.
+The value 4.03 is the maximum of the test. Each label, grad and spread row is one run.
 
 Lower claimed ε for the label assignment:
 
@@ -214,7 +214,6 @@ Median over the forget points:
 | -------------------------------------------- | ----------------- | ------------------------ |
 | Shift of φ when the own batch is deleted     | \[0.003, 0.004\]  | \[0.044, 0.056\]         |
 | Shift of φ when a different batch is deleted | \[0.003, 0.005\]  | \[0.013, 0.018\]         |
-| Noise of φ at ε = 1000 (standard deviation)  | \[0.015, 0.017\]  | \[0.016, 0.018\]         |
 
 
 **The signal identifies the batch.** The own batch gives 3 times the shift of a
